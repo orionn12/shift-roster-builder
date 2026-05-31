@@ -1,0 +1,628 @@
+from __future__ import annotations
+
+import calendar
+from dataclasses import dataclass
+from typing import Any
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from ortools.sat.python import cp_model
+from pydantic import BaseModel, Field
+
+
+class ShiftDefinition(BaseModel):
+    code: str
+    time: str = ""
+    auto: bool = True
+
+
+class Conditions(BaseModel):
+    shifts: dict[str, ShiftDefinition] = Field(default_factory=dict)
+    weekdayNeed: dict[str, int] = Field(default_factory=dict)
+    saturdayNeed: dict[str, int] = Field(default_factory=dict)
+    sundayNeed: dict[str, int] = Field(default_factory=dict)
+    holidayNeed: dict[str, int] = Field(default_factory=dict)
+    weekendNeed: dict[str, int] = Field(default_factory=dict)
+    dailyNeed: dict[str, int] = Field(default_factory=dict)
+    maxConsecutive: int = 5
+    minConsecutiveHolidays: int = 0
+    mustOneGroups: list[list[str]] = Field(default_factory=list)
+    sameShiftGroups: list[list[str]] = Field(default_factory=list)
+    paidLeaves: dict[str, list[int]] = Field(default_factory=dict)
+    targetWorkDays: int | None = None
+    targetWorkDaysByPerson: dict[str, int] = Field(default_factory=dict)
+    fixedWeekdayShifts: dict[str, str] = Field(default_factory=dict)
+    fixedDateShifts: dict[str, dict[str, str]] = Field(default_factory=dict)
+    allowedShifts: dict[str, list[str]] = Field(default_factory=dict)
+    forbiddenAlwaysShifts: dict[str, list[str]] = Field(default_factory=dict)
+    forcedOffDates: dict[str, list[int]] = Field(default_factory=dict)
+    unavailableWeekdayShifts: dict[str, dict[str, list[str]]] = Field(default_factory=dict)
+    requiredTransitionBreaks: list[list[str]] = Field(default_factory=list)
+    autoShiftCodes: list[str] = Field(default_factory=list)
+    holidayDates: list[int] = Field(default_factory=list)
+    dateNeed: dict[int, dict[str, int]] = Field(default_factory=dict)
+    preferConsecutiveHolidays: bool = False
+    preferSameShiftStreaks: bool = False
+    leaderGroup: list[str] = Field(default_factory=list)
+    subLeaderGroup: list[str] = Field(default_factory=list)
+    newcomerGroup: list[str] = Field(default_factory=list)
+    requireLeadershipCoverage: bool = False
+    preferLeader: bool = False
+    coverageRules: list[dict[str, Any]] = Field(default_factory=list)
+    staffAttributes: dict[str, str] = Field(default_factory=dict)
+
+
+class PreviousTail(BaseModel):
+    lastShift: str = "OFF"
+    consecutiveWorkDays: int = 0
+
+
+class SolveRequest(BaseModel):
+    staff: list[str]
+    month: str
+    conditions: Conditions
+    previousMonthTail: dict[str, PreviousTail] = Field(default_factory=dict)
+
+
+class SolveResponse(BaseModel):
+    status: str
+    message: str
+    report: dict[str, Any] = Field(default_factory=dict)
+    schedule: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MonthInfo:
+    year: int
+    month: int
+    days: list[int]
+
+
+app = FastAPI(title="Shift Roster Builder Solver")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/api/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/api/solve", response_model=SolveResponse)
+def solve_roster(request: SolveRequest) -> SolveResponse:
+    month_info = parse_month(request.month)
+    staff = request.staff
+    conditions = request.conditions
+    holiday_set = set(conditions.holidayDates)
+
+    auto_shift_set = {shift.code for shift in conditions.shifts.values() if shift.auto}
+    if conditions.targetWorkDays is not None:
+        for filler_shift in ("常勤", "日勤"):
+            if filler_shift in conditions.shifts:
+                auto_shift_set.add(filler_shift)
+    auto_shift_set.update(conditions.fixedWeekdayShifts.values())
+    for allowed in conditions.allowedShifts.values():
+        auto_shift_set.update(allowed)
+    # Also include shifts referenced in fixedDateShifts
+    for day_shifts in conditions.fixedDateShifts.values():
+        auto_shift_set.update(day_shifts.values())
+    auto_shifts = sorted(shift for shift in auto_shift_set if shift in conditions.shifts)
+    previous_tail = request.previousMonthTail
+
+    if not staff:
+        return SolveResponse(
+            status="error",
+            message="スタッフが登録されていません。",
+            report=failure_report("スタッフが登録されていないため、勤務表を作成できませんでした。"),
+        )
+    if not auto_shifts:
+        return SolveResponse(
+            status="error",
+            message="自動割当する勤務区分がありません。",
+            report=failure_report("自由条件から自動割当する勤務区分を読み取れませんでした。"),
+        )
+
+    model = cp_model.CpModel()
+    x: dict[tuple[int, int, str], cp_model.IntVar] = {}
+    work_day: dict[tuple[int, int], cp_model.IntVar] = {}
+
+    for person_index, _person in enumerate(staff):
+        for day in month_info.days:
+            work_day[(person_index, day)] = model.NewBoolVar(f"work_{person_index}_{day}")
+            for shift_code in auto_shifts:
+                x[(person_index, day, shift_code)] = model.NewBoolVar(
+                    f"x_{person_index}_{day}_{shift_code}",
+                )
+
+    for person_index, person in enumerate(staff):
+        paid_days = set(conditions.paidLeaves.get(person, []))
+        allowed = set(conditions.allowedShifts.get(person, auto_shifts))
+        fixed_weekday_shift = conditions.fixedWeekdayShifts.get(person)
+        fixed_date_shifts = {int(k): v for k, v in conditions.fixedDateShifts.get(person, {}).items()}
+        forbidden_always = set(conditions.forbiddenAlwaysShifts.get(person, []))
+        forced_off_dates = set(conditions.forcedOffDates.get(person, []))
+        unavailable_by_weekday = conditions.unavailableWeekdayShifts.get(person, {})
+
+        for day in month_info.days:
+            work_vars = [x[(person_index, day, shift_code)] for shift_code in auto_shifts]
+            model.Add(sum(work_vars) <= 1)
+            model.Add(work_day[(person_index, day)] == sum(work_vars))
+
+            # PAID days → OFF (no auto shift)
+            if day in paid_days:
+                model.Add(sum(work_vars) == 0)
+                continue
+
+            # Forced off on specific dates
+            if day in forced_off_dates:
+                model.Add(sum(work_vars) == 0)
+                continue
+
+            for shift_code in auto_shifts:
+                # Allowed shifts filter
+                if shift_code not in allowed:
+                    model.Add(x[(person_index, day, shift_code)] == 0)
+                # Always forbidden shifts
+                if shift_code in forbidden_always:
+                    model.Add(x[(person_index, day, shift_code)] == 0)
+                # Weekday-specific forbidden shifts
+                weekday_key = str(calendar.weekday(month_info.year, month_info.month, day))
+                if shift_code in unavailable_by_weekday.get(weekday_key, []):
+                    model.Add(x[(person_index, day, shift_code)] == 0)
+
+            # fixedDateShifts: explicit per-day assignment (highest priority)
+            if day in fixed_date_shifts:
+                target_shift = fixed_date_shifts[day]
+                if target_shift in auto_shifts:
+                    model.Add(x[(person_index, day, target_shift)] == 1)
+            elif fixed_weekday_shift and fixed_weekday_shift in auto_shifts:
+                # Fallback: fixedWeekdayShifts for weekdays not covered by fixedDateShifts
+                weekday = calendar.weekday(month_info.year, month_info.month, day)
+                if weekday < 5 and day not in holiday_set:
+                    model.Add(x[(person_index, day, fixed_weekday_shift)] == 1)
+
+        person_target_work_days = conditions.targetWorkDaysByPerson.get(person, conditions.targetWorkDays)
+        if person_target_work_days is not None:
+            target = max(0, person_target_work_days)
+            model.Add(
+                sum(
+                    x[(person_index, day, shift_code)]
+                    for day in month_info.days
+                    for shift_code in auto_shifts
+                )
+                == target,
+            )
+
+    # Daily staffing needs
+    for day in month_info.days:
+        weekday = calendar.weekday(month_info.year, month_info.month, day)
+        is_holiday = day in holiday_set
+        for shift_code in auto_shifts:
+            needed = needed_staff_count(month_info, day, shift_code, conditions, weekday, is_holiday)
+            needed = conditions.dateNeed.get(day, {}).get(shift_code, needed)
+            model.Add(sum(x[(person_index, day, shift_code)] for person_index in range(len(staff))) >= needed)
+
+    # Leadership coverage
+    if conditions.requireLeadershipCoverage:
+        staff_index = {person: index for index, person in enumerate(staff)}
+        leader_indexes = [staff_index[person] for person in conditions.leaderGroup if person in staff_index]
+        sub_indexes = [staff_index[person] for person in conditions.subLeaderGroup if person in staff_index]
+        for day in month_info.days:
+            leader_work = sum(
+                x[(person_index, day, shift_code)]
+                for person_index in leader_indexes
+                for shift_code in auto_shifts
+            )
+            sub_work = sum(
+                x[(person_index, day, shift_code)]
+                for person_index in sub_indexes
+                for shift_code in auto_shifts
+            )
+            if sub_indexes:
+                model.Add(sub_work >= 1)
+            if leader_indexes or sub_indexes:
+                model.Add(leader_work + sub_work >= 2)
+
+    # Coverage rules (attribute-based)
+    if conditions.coverageRules:
+        generic_groups: dict[str, list[int]] = {}
+        for index, person in enumerate(staff):
+            attribute = conditions.staffAttributes.get(person, "")
+            if attribute:
+                generic_groups.setdefault(attribute, []).append(index)
+        generic_groups.setdefault("リーダー", [index for index, person in enumerate(staff) if person in conditions.leaderGroup])
+        generic_groups.setdefault("サブリーダー", [index for index, person in enumerate(staff) if person in conditions.subLeaderGroup])
+        generic_groups.setdefault("新人", [index for index, person in enumerate(staff) if person in conditions.newcomerGroup])
+        for rule_index, rule in enumerate(conditions.coverageRules):
+            cond_list = rule.get("conditions", [])
+            day_type = str(rule.get("dayType", "all") or "all")
+            groups_and_counts: list[tuple[list[int], int]] = []
+            for cond in cond_list:
+                attr = str(cond.get("attribute", "")).strip()
+                count = int(cond.get("count") or 0)
+                if attr and count > 0:
+                    groups_and_counts.append((generic_groups.get(attr, []), count))
+            if not groups_and_counts:
+                continue
+            for day in month_info.days:
+                weekday = calendar.weekday(month_info.year, month_info.month, day)
+                if day_type == "weekday" and weekday >= 5:
+                    continue
+                if day_type == "weekendHoliday" and weekday < 5:
+                    continue
+                for group_indexes, min_count in groups_and_counts:
+                    if not group_indexes:
+                        continue
+                    group_work = sum(
+                        x[(person_index, day, shift_code)]
+                        for person_index in group_indexes
+                        for shift_code in auto_shifts
+                    )
+                    model.Add(group_work >= min_count)
+
+    # Max consecutive work days
+    max_consecutive = max(1, conditions.maxConsecutive)
+    for person_index in range(len(staff)):
+        for start_idx in range(len(month_info.days) - max_consecutive):
+            window = month_info.days[start_idx:start_idx + max_consecutive + 1]
+            model.Add(
+                sum(
+                    x[(person_index, day, shift_code)]
+                    for day in window
+                    for shift_code in auto_shifts
+                )
+                <= max_consecutive,
+            )
+
+    # Min consecutive holidays (no isolated OFF days)
+    min_holidays = conditions.minConsecutiveHolidays
+    if min_holidays >= 2:
+        for person_index, person in enumerate(staff):
+            # Mid-month: forbid OFF runs shorter than min_holidays
+            for j in range(1, min_holidays):
+                for i in range(len(month_info.days) - j - 1):
+                    d_start = month_info.days[i]
+                    d_end = month_info.days[i + j + 1]
+                    mid_work = sum(
+                        work_day[(person_index, month_info.days[i + l])]
+                        for l in range(1, j + 1)
+                    )
+                    # Forbid: work[d_start]=1 AND all mid=OFF AND work[d_end]=1
+                    model.Add(
+                        work_day[(person_index, d_start)]
+                        - mid_work
+                        + work_day[(person_index, d_end)]
+                        <= 1
+                    )
+            # Month-start boundary: if previous month ended with work (or unknown),
+            # an OFF run starting at day 1 must extend at least min_holidays days.
+            tail = previous_tail.get(person)
+            prev_was_working = (
+                tail is None
+                or tail.consecutiveWorkDays > 0
+                or tail.lastShift not in ("OFF", "PAID", "特休", "")
+            )
+            if prev_was_working:
+                for j in range(1, min_holidays):
+                    if j < len(month_info.days):
+                        # If all of days[0..j-1] are OFF, day[j] must also be OFF
+                        # work[day[j]] <= sum(work[day[0..j-1]])
+                        model.Add(
+                            work_day[(person_index, month_info.days[j])]
+                            <= sum(work_day[(person_index, month_info.days[k])] for k in range(j))
+                        )
+
+    # Previous month tail (max consecutive rollover)
+    for person_index, person in enumerate(staff):
+        tail = previous_tail.get(person)
+        if not tail:
+            continue
+        previous_count = min(max_consecutive, max(0, tail.consecutiveWorkDays))
+        if previous_count <= 0:
+            continue
+        limited_days = min(len(month_info.days), max_consecutive - previous_count + 1)
+        if limited_days > 0:
+            model.Add(
+                sum(
+                    x[(person_index, day, shift_code)]
+                    for day in month_info.days[:limited_days]
+                    for shift_code in auto_shifts
+                )
+                <= max_consecutive - previous_count,
+            )
+
+    # Required shift transition breaks (e.g., no C→A on consecutive days)
+    break_pairs = {(pair[0], pair[1]) for pair in conditions.requiredTransitionBreaks if len(pair) == 2}
+    for from_shift, to_shift in break_pairs:
+        if from_shift not in auto_shifts or to_shift not in auto_shifts:
+            continue
+        for person_index in range(len(staff)):
+            for i in range(len(month_info.days) - 1):
+                day = month_info.days[i]
+                next_day = month_info.days[i + 1]
+                model.Add(x[(person_index, day, from_shift)] + x[(person_index, next_day, to_shift)] <= 1)
+
+    staff_index = {person: index for index, person in enumerate(staff)}
+
+    for group in conditions.mustOneGroups:
+        group_indexes = [staff_index[person] for person in group if person in staff_index]
+        if not group_indexes:
+            continue
+        for day in month_info.days:
+            model.Add(
+                sum(
+                    x[(person_index, day, shift_code)]
+                    for person_index in group_indexes
+                    for shift_code in auto_shifts
+                )
+                >= 1,
+            )
+
+    for group in conditions.sameShiftGroups:
+        group_indexes = [staff_index[person] for person in group if person in staff_index]
+        if len(group_indexes) < 2:
+            continue
+        anchor = group_indexes[0]
+        for person_index in group_indexes[1:]:
+            for day in month_info.days:
+                for shift_code in auto_shifts:
+                    model.Add(x[(person_index, day, shift_code)] == x[(anchor, day, shift_code)])
+
+    # Objective: minimize work-day imbalance + shift distribution imbalance
+    total_work_vars: list[cp_model.IntVar] = []
+    shift_range_vars: list[cp_model.IntVar] = []
+    transition_vars: list[cp_model.IntVar] = []
+    shift_change_vars: list[cp_model.IntVar] = []
+
+    for person_index, _person in enumerate(staff):
+        total = model.NewIntVar(0, len(month_info.days), f"total_{person_index}")
+        model.Add(total == sum(work_day[(person_index, day)] for day in month_info.days))
+        total_work_vars.append(total)
+
+        for day in month_info.days[:-1]:
+            transition = model.NewBoolVar(f"transition_{person_index}_{day}")
+            model.AddAbsEquality(transition, work_day[(person_index, day)] - work_day[(person_index, day + 1)])
+            transition_vars.append(transition)
+            for shift_code in auto_shifts:
+                change = model.NewBoolVar(f"shift_change_{person_index}_{day}_{shift_code}")
+                model.AddAbsEquality(change, x[(person_index, day, shift_code)] - x[(person_index, day + 1, shift_code)])
+                shift_change_vars.append(change)
+
+    max_total = model.NewIntVar(0, len(month_info.days), "max_total")
+    min_total = model.NewIntVar(0, len(month_info.days), "min_total")
+    model.AddMaxEquality(max_total, total_work_vars)
+    model.AddMinEquality(min_total, total_work_vars)
+
+    for shift_code in auto_shifts:
+        shift_totals: list[cp_model.IntVar] = []
+        for person_index in range(len(staff)):
+            total = model.NewIntVar(0, len(month_info.days), f"total_{person_index}_{shift_code}")
+            model.Add(total == sum(x[(person_index, day, shift_code)] for day in month_info.days))
+            shift_totals.append(total)
+        shift_max = model.NewIntVar(0, len(month_info.days), f"max_{shift_code}")
+        shift_min = model.NewIntVar(0, len(month_info.days), f"min_{shift_code}")
+        model.AddMaxEquality(shift_max, shift_totals)
+        model.AddMinEquality(shift_min, shift_totals)
+        diff = model.NewIntVar(0, len(month_info.days), f"range_{shift_code}")
+        model.Add(diff == shift_max - shift_min)
+        shift_range_vars.append(diff)
+
+    transition_weight = 4 if conditions.preferConsecutiveHolidays else 0
+    shift_change_weight = 2 if conditions.preferSameShiftStreaks else 0
+    model.Minimize(
+        (max_total - min_total) * 100
+        + sum(shift_range_vars) * 10
+        + sum(transition_vars) * transition_weight
+        + sum(shift_change_vars) * shift_change_weight
+    )
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 15
+    solver.parameters.num_search_workers = 8
+    status = solver.Solve(model)
+
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return SolveResponse(
+            status="infeasible",
+            message="条件をすべて満たす勤務表が見つかりませんでした。必要人数、有給、同一勤務、最大連勤を少し緩めてください。",
+            report=build_infeasible_report(staff, month_info, conditions, auto_shifts),
+        )
+
+    schedule: dict[str, dict[str, str]] = {}
+    for person_index, person in enumerate(staff):
+        paid_days = set(conditions.paidLeaves.get(person, []))
+        fixed_date_shifts = {int(k): v for k, v in conditions.fixedDateShifts.get(person, {}).items()}
+        schedule[person] = {}
+        for day in month_info.days:
+            if day in paid_days:
+                assigned = "PAID"
+            elif day in fixed_date_shifts and fixed_date_shifts[day] not in auto_shifts:
+                # Fixed shift not in solver domain: assign directly
+                assigned = fixed_date_shifts[day]
+            else:
+                assigned = "OFF"
+                for shift_code in auto_shifts:
+                    if solver.Value(x[(person_index, day, shift_code)]) == 1:
+                        assigned = shift_code
+                        break
+            schedule[person][str(day)] = assigned
+
+    return SolveResponse(
+        status="optimal" if status == cp_model.OPTIMAL else "feasible",
+        message="CP-SATで勤務表を作成しました。",
+        report=build_success_report(
+            schedule,
+            month_info,
+            auto_shifts,
+            status == cp_model.OPTIMAL,
+            previous_tail,
+        ),
+        schedule=schedule,
+    )
+
+
+def parse_month(month_value: str) -> MonthInfo:
+    year_text, month_text = month_value.split("-")
+    year = int(year_text)
+    month = int(month_text)
+    _, last_day = calendar.monthrange(year, month)
+    return MonthInfo(year=year, month=month, days=list(range(1, last_day + 1)))
+
+
+def needed_staff_count(
+    month_info: MonthInfo,
+    day: int,
+    shift_code: str,
+    conditions: Conditions,
+    weekday: int | None = None,
+    is_holiday: bool = False,
+) -> int:
+    if weekday is None:
+        weekday = calendar.weekday(month_info.year, month_info.month, day)
+    if is_holiday:
+        return conditions.holidayNeed.get(
+            shift_code,
+            conditions.weekendNeed.get(shift_code, conditions.dailyNeed.get(shift_code, 0)),
+        )
+    if weekday == 5:  # Saturday
+        return conditions.saturdayNeed.get(
+            shift_code,
+            conditions.weekendNeed.get(shift_code, conditions.dailyNeed.get(shift_code, 0)),
+        )
+    if weekday == 6:  # Sunday
+        return conditions.sundayNeed.get(
+            shift_code,
+            conditions.weekendNeed.get(shift_code, conditions.dailyNeed.get(shift_code, 0)),
+        )
+    return conditions.weekdayNeed.get(shift_code, conditions.dailyNeed.get(shift_code, 0))
+
+
+def failure_report(summary: str) -> dict[str, Any]:
+    return {
+        "title": "作成できませんでした",
+        "summary": summary,
+        "warnings": [],
+        "suggestions": ["スタッフまたは勤務区分の条件を確認してください。"],
+        "stats": {},
+    }
+
+
+def build_infeasible_report(
+    staff: list[str],
+    month_info: MonthInfo,
+    conditions: Conditions,
+    auto_shifts: list[str],
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    suggestions: list[str] = []
+
+    for day in month_info.days:
+        unavailable = {
+            person
+            for person in staff
+            if day in set(conditions.paidLeaves.get(person, []))
+            or day in set(conditions.forcedOffDates.get(person, []))
+        }
+        available_count = len(staff) - len(unavailable)
+        weekday = calendar.weekday(month_info.year, month_info.month, day)
+        is_holiday = day in set(conditions.holidayDates)
+        needed_total = sum(
+            needed_staff_count(month_info, day, shift, conditions, weekday, is_holiday)
+            for shift in auto_shifts
+        )
+        if needed_total > available_count:
+            warnings.append(f"{day}日は必要人数{needed_total}人に対して、配置可能人数が{available_count}人です。")
+
+    if not warnings:
+        warnings.append("必要人数、有給、最大連勤、同一勤務、必ず1人のいずれかが同時に満たせない可能性があります。")
+
+    suggestions.extend(
+        [
+            "必要人数を一部減らす",
+            "最大連勤を少し増やす",
+            "同一勤務や必ず1人の条件を一部緩める",
+            "同じ日に集中している有給指定を見直す",
+        ],
+    )
+
+    return {
+        "title": "作成できませんでした",
+        "summary": "CP-SATで解を探索しましたが、すべての条件を満たす勤務表は見つかりませんでした。",
+        "warnings": warnings[:8],
+        "suggestions": suggestions,
+        "stats": {
+            "staffCount": len(staff),
+            "autoShiftCount": len(auto_shifts),
+        },
+    }
+
+
+def build_success_report(
+    schedule: dict[str, dict[str, str]],
+    month_info: MonthInfo,
+    auto_shifts: list[str],
+    is_optimal: bool,
+    previous_tail: dict[str, PreviousTail],
+) -> dict[str, Any]:
+    work_counts: dict[str, int] = {}
+    shift_counts: dict[str, dict[str, int]] = {}
+    paid_count = 0
+
+    for person, assignments in schedule.items():
+        work_counts[person] = 0
+        shift_counts[person] = {shift: 0 for shift in auto_shifts}
+        for code in assignments.values():
+            if code == "PAID":
+                paid_count += 1
+            elif code not in ("OFF", "特休"):
+                work_counts[person] += 1
+                if code in shift_counts[person]:
+                    shift_counts[person][code] += 1
+
+    min_work = min(work_counts.values()) if work_counts else 0
+    max_work = max(work_counts.values()) if work_counts else 0
+    warnings: list[str] = []
+
+    if max_work - min_work >= 3:
+        warnings.append(f"勤務日数に最大{max_work - min_work}日の差があります。")
+
+    for shift in auto_shifts:
+        counts = {person: shifts[shift] for person, shifts in shift_counts.items()}
+        if not counts:
+            continue
+        min_shift = min(counts.values())
+        max_shift = max(counts.values())
+        if max_shift - min_shift >= 3:
+            heavy = [person for person, count in counts.items() if count == max_shift]
+            warnings.append(f"{shift}勤務は{', '.join(heavy[:3])}にやや多めです。")
+
+    if not warnings:
+        warnings.append("大きな偏りは検出されませんでした。")
+
+    inherited_count = sum(
+        1
+        for tail in previous_tail.values()
+        if tail.lastShift not in ("", "OFF", "PAID") or tail.consecutiveWorkDays > 0
+    )
+    if inherited_count:
+        warnings.append(f"前月末の勤務情報を{inherited_count}人分参照しました。")
+
+    return {
+        "title": "作成できました",
+        "summary": "必要人数、有給、最大連勤などの条件を満たす勤務表を作成しました。",
+        "warnings": warnings,
+        "suggestions": [] if is_optimal else ["最適解ではなく実行可能解です。条件を少し緩めるとより公平な表になる可能性があります。"],
+        "stats": {
+            "solverStatus": "optimal" if is_optimal else "feasible",
+            "staffCount": len(schedule),
+            "days": len(month_info.days),
+            "paidCount": paid_count,
+            "minWorkDays": min_work,
+            "maxWorkDays": max_work,
+        },
+    }

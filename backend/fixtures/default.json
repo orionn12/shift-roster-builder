@@ -1,0 +1,64 @@
+{
+  "staff": [
+    "小里", "松本", "小伏", "川田", "梅崎", "浅山", "姫島", "田上", "竹井",
+    "麻生", "三輪", "高松", "芦原", "古川", "杉山", "高田", "高橋", "田島",
+    "岩田", "近藤", "今里", "原口", "吉瀬"
+  ],
+  "month": "2026-06",
+  "conditions": {
+    "shifts": {
+      "A":   { "code": "A",   "time": "7:00-16:00",  "auto": true  },
+      "C":   { "code": "C",   "time": "15:00-0:00",  "auto": true  },
+      "E":   { "code": "E",   "time": "23:00-8:00",  "auto": true  },
+      "D":   { "code": "D",   "time": "20:00-5:00",  "auto": false },
+      "常勤": { "code": "常勤", "time": "9:00-18:00",  "auto": false }
+    },
+    "weekdayNeed":  { "A": 4, "C": 2, "E": 4 },
+    "saturdayNeed": { "A": 2, "C": 2, "E": 2 },
+    "sundayNeed":   { "A": 2, "C": 2, "E": 2 },
+    "holidayNeed":  { "A": 2, "C": 2, "E": 2 },
+    "weekendNeed":  { "A": 2, "C": 2, "E": 2 },
+    "autoShiftCodes": ["A", "C", "E"],
+    "maxConsecutive": 6,
+    "minConsecutiveHolidays": 2,
+    "preferConsecutiveHolidays": true,
+    "preferSameShiftStreaks": true,
+    "fixedWeekdayShifts": { "小里": "常勤", "古川": "A", "今里": "A" },
+    "fixedDateShifts": {
+      "小里": { "1":"常勤","2":"常勤","3":"常勤","4":"常勤","5":"常勤","8":"常勤","9":"常勤","10":"常勤","11":"常勤","12":"常勤","15":"常勤","16":"常勤","17":"常勤","18":"常勤","19":"常勤","22":"常勤","23":"常勤","24":"常勤","25":"常勤","26":"常勤","29":"常勤","30":"常勤" },
+      "古川": { "1":"A","2":"A","3":"A","4":"A","5":"A","8":"A","9":"A","10":"A","11":"A","12":"A","15":"A","16":"A","17":"A","18":"A","19":"A","22":"A","23":"A","24":"A","25":"A","26":"A","29":"A","30":"A" },
+      "今里": { "1":"A","2":"A","3":"A","4":"A","5":"A","8":"A","9":"A","10":"A","11":"A","12":"A","15":"A","16":"A","17":"A","18":"A","19":"A","22":"A","23":"A","24":"A","25":"A","26":"A","29":"A","30":"A" }
+    },
+    "allowedShifts": { "松本": ["A", "C"] },
+    "unavailableWeekdayShifts": { "小代": { "6": ["C"] } },
+    "forbiddenAlwaysShifts": {},
+    "forcedOffDates": {},
+    "requiredTransitionBreaks": [["C", "A"], ["E", "A"]],
+    "holidayDates": [],
+    "dateNeed": { "20": { "E": 5 }, "21": { "A": 3 } },
+    "coverageRules": [
+      {
+        "label": "リーダー/サブリーダー必須",
+        "conditions": [
+          { "attribute": "リーダー",    "count": 1 },
+          { "attribute": "サブリーダー", "count": 1 }
+        ]
+      }
+    ],
+    "staffAttributes": {
+      "松本": "リーダー", "川田": "リーダー", "浅山": "リーダー",
+      "姫島": "サブリーダー", "竹井": "サブリーダー", "田上": "サブリーダー",
+      "麻生": "サブリーダー", "三輪": "サブリーダー", "高松": "サブリーダー",
+      "原口": "新人"
+    },
+    "leaderGroup":    ["松本", "川田", "浅山"],
+    "subLeaderGroup": ["姫島", "竹井", "田上", "麻生", "三輪", "高松"],
+    "newcomerGroup":  ["原口"],
+    "requireLeadershipCoverage": false,
+    "paidLeaves": {},
+    "mustOneGroups": [],
+    "sameShiftGroups": [],
+    "targetWorkDaysByPerson": {}
+  },
+  "previousMonthTail": {}
+}
