@@ -248,6 +248,150 @@ def assert_fixed_assignments(request: SolveRequest, schedule) -> list[dict]:
     return results
 
 
+def assert_allowed_shifts(request: SolveRequest, schedule) -> list[dict]:
+    """allowedShifts の制限が守られているか確認する。
+    各人の自動割り当てシフトは allowedShifts で指定されたコードのみであること。
+    OFF/PAID/特休 および fixedDateShifts・fixedAssignments 由来の非autoシフトは許可。
+    """
+    results = []
+    conditions = request.conditions
+    auto_codes = set(conditions.autoShiftCodes)
+    for person, allowed in conditions.allowedShifts.items():
+        allowed_set = set(allowed)
+        # fixedDateShifts / fixedAssignments 由来のシフトは対象外
+        override_shifts: set[str] = set()
+        for v in conditions.fixedDateShifts.get(person, {}).values():
+            override_shifts.add(v)
+        for v in request.fixedAssignments.get(person, {}).values():
+            override_shifts.add(v)
+        violations: list[str] = []
+        for day_str, code in schedule.get(person, {}).items():
+            if code in OFF_CODES or code in override_shifts:
+                continue
+            # Only check codes that are supposed to be auto-assigned
+            if code in auto_codes and code not in allowed_set:
+                violations.append(f"day {day_str}: {code} (not in {sorted(allowed_set)})")
+        results.append(check(
+            f"{person} allowedShifts制限",
+            not violations,
+            "; ".join(violations[:3]) if violations else f"許可シフト {sorted(allowed_set)} のみ",
+        ))
+    return results
+
+
+def assert_coverage_rules(request: SolveRequest, schedule) -> list[dict]:
+    """coverageRules の充足を確認する。
+    ルールが1つ: すべての条件が毎日満たされること（AND）。
+    ルールが複数: 毎日いずれか1つのルールが満たされること（OR）。
+    """
+    results = []
+    conditions = request.conditions
+    if not conditions.coverageRules:
+        return results
+
+    year, month_num = map(int, request.month.split("-"))
+    _, last_day = calendar.monthrange(year, month_num)
+    days = list(range(1, last_day + 1))
+
+    # Build attribute -> person index set
+    attr_to_persons: dict[str, set[str]] = {}
+    for person, attr in conditions.staffAttributes.items():
+        if attr:
+            attr_to_persons.setdefault(attr, set()).add(person)
+    # Also include leaderGroup / subLeaderGroup / newcomerGroup
+    for person in conditions.leaderGroup:
+        attr_to_persons.setdefault("リーダー", set()).add(person)
+    for person in conditions.subLeaderGroup:
+        attr_to_persons.setdefault("サブリーダー", set()).add(person)
+    for person in conditions.newcomerGroup:
+        attr_to_persons.setdefault("新人", set()).add(person)
+
+    def rule_satisfied(rule_conditions: list[dict], day: int) -> bool:
+        """Returns True iff ALL conditions in a rule are met for the given day."""
+        for cond in rule_conditions:
+            attr = str(cond.get("attribute", "")).strip()
+            needed = int(cond.get("count") or 0)
+            if not attr or needed <= 0:
+                continue
+            members = attr_to_persons.get(attr, set())
+            working = sum(
+                1 for p in members
+                if schedule.get(p, {}).get(str(day), "OFF") not in OFF_CODES
+            )
+            if working < needed:
+                return False
+        return True
+
+    violations: list[str] = []
+    for day in days:
+        weekday = calendar.weekday(year, month_num, day)
+        applicable = []
+        for rule in conditions.coverageRules:
+            day_type = str(rule.get("dayType", "all") or "all")
+            if day_type == "weekday" and weekday >= 5:
+                continue
+            if day_type == "weekendHoliday" and weekday < 5:
+                continue
+            applicable.append(rule.get("conditions", []))
+        if not applicable:
+            continue
+        if len(applicable) == 1:
+            if not rule_satisfied(applicable[0], day):
+                violations.append(f"day {day}: rule not satisfied")
+        else:
+            if not any(rule_satisfied(rc, day) for rc in applicable):
+                violations.append(f"day {day}: no rule satisfied (OR)")
+
+    results.append(check(
+        "coverageRules 充足",
+        not violations,
+        "; ".join(violations[:5]) if violations else "全日程でルール充足",
+    ))
+    return results
+
+
+def assert_forced_off_dates(request: SolveRequest, schedule) -> list[dict]:
+    """forcedOffDates で指定した日が OFF/PAID/特休 になっているか確認する"""
+    results = []
+    conditions = request.conditions
+    if not conditions.forcedOffDates:
+        results.append(check("forcedOffDates (空)", True, "設定なし・自明合格"))
+        return results
+    for person, off_days in conditions.forcedOffDates.items():
+        violations: list[str] = []
+        for day in off_days:
+            actual = schedule.get(person, {}).get(str(day), "OFF")
+            if actual not in OFF_CODES:
+                violations.append(f"day {day}: {actual}")
+        results.append(check(
+            f"{person} forcedOffDates",
+            not violations,
+            "; ".join(violations[:3]) if violations else f"{len(off_days)}日すべてOFF/PAID/特休",
+        ))
+    return results
+
+
+def assert_forbidden_always_shifts(request: SolveRequest, schedule) -> list[dict]:
+    """forbiddenAlwaysShifts で禁止されたシフトが割り当てられていないか確認する"""
+    results = []
+    conditions = request.conditions
+    if not conditions.forbiddenAlwaysShifts:
+        results.append(check("forbiddenAlwaysShifts (空)", True, "設定なし・自明合格"))
+        return results
+    for person, forbidden in conditions.forbiddenAlwaysShifts.items():
+        forbidden_set = set(forbidden)
+        violations: list[str] = []
+        for day_str, code in schedule.get(person, {}).items():
+            if code in forbidden_set:
+                violations.append(f"day {day_str}: {code}")
+        results.append(check(
+            f"{person} forbiddenAlwaysShifts",
+            not violations,
+            "; ".join(violations[:3]) if violations else f"禁止シフト {sorted(forbidden_set)} 未使用",
+        ))
+    return results
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def run(fixture_path: str) -> bool:
@@ -275,6 +419,10 @@ def run(fixture_path: str) -> bool:
         results += assert_transition_breaks(request, schedule)
         results += assert_no_non_auto_leakage(request, schedule)
         results += assert_fixed_assignments(request, schedule)
+        results += assert_allowed_shifts(request, schedule)
+        results += assert_coverage_rules(request, schedule)
+        results += assert_forced_off_dates(request, schedule)
+        results += assert_forbidden_always_shifts(request, schedule)
 
     passed = sum(1 for r in results if r["passed"])
     total = len(results)

@@ -31,8 +31,13 @@
     },
     "allowedShifts": { "松本": ["A", "C"] },
     "unavailableWeekdayShifts": { "小代": { "6": ["C"] } },
-    "forbiddenAlwaysShifts": {},
-    "forcedOffDates": {},
+    "forbiddenAlwaysShifts": { "芦原": ["E"] },
+    "forcedOffDates": {
+      "小里": [6, 7, 13, 14, 20, 21, 27, 28],
+      "古川": [6, 7, 13, 14, 20, 21, 27, 28],
+      "今里": [6, 7, 13, 14, 20, 21, 27, 28],
+      "杉山": [3, 4]
+    },
     "requiredTransitionBreaks": [["C", "A"], ["E", "A"]],
     "holidayDates": [],
     "dateNeed": { "20": { "E": 5 }, "21": { "A": 3 } },

@@ -265,7 +265,10 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
         generic_groups.setdefault("リーダー", [index for index, person in enumerate(staff) if person in conditions.leaderGroup])
         generic_groups.setdefault("サブリーダー", [index for index, person in enumerate(staff) if person in conditions.subLeaderGroup])
         generic_groups.setdefault("新人", [index for index, person in enumerate(staff) if person in conditions.newcomerGroup])
-        for rule_index, rule in enumerate(conditions.coverageRules):
+
+        # Pre-parse all rules into (day_type, groups_and_counts) tuples
+        parsed_rules: list[tuple[str, list[tuple[list[int], int]]]] = []
+        for rule in conditions.coverageRules:
             cond_list = rule.get("conditions", [])
             day_type = str(rule.get("dayType", "all") or "all")
             groups_and_counts: list[tuple[list[int], int]] = []
@@ -274,15 +277,24 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
                 count = int(cond.get("count") or 0)
                 if attr and count > 0:
                     groups_and_counts.append((generic_groups.get(attr, []), count))
-            if not groups_and_counts:
-                continue
-            for day in month_info.days:
-                weekday = calendar.weekday(month_info.year, month_info.month, day)
+            if groups_and_counts:
+                parsed_rules.append((day_type, groups_and_counts))
+
+        for day in month_info.days:
+            weekday = calendar.weekday(month_info.year, month_info.month, day)
+            # Collect applicable rules for this day
+            applicable: list[list[tuple[list[int], int]]] = []
+            for day_type, groups_and_counts in parsed_rules:
                 if day_type == "weekday" and weekday >= 5:
                     continue
                 if day_type == "weekendHoliday" and weekday < 5:
                     continue
-                for group_indexes, min_count in groups_and_counts:
+                applicable.append(groups_and_counts)
+            if not applicable:
+                continue
+            if len(applicable) == 1:
+                # Single rule: apply as hard AND constraints
+                for group_indexes, min_count in applicable[0]:
                     if not group_indexes:
                         continue
                     group_work = sum(
@@ -291,6 +303,24 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
                         for shift_code in auto_shifts
                     )
                     model.Add(group_work >= min_count)
+            else:
+                # Multiple rules: OR logic — at least one rule must be fully satisfied
+                rule_bools = []
+                for ridx, rule_conditions in enumerate(applicable):
+                    rb = model.NewBoolVar(f"rule_ok_{day}_{ridx}")
+                    rule_bools.append(rb)
+                    for group_indexes, min_count in rule_conditions:
+                        if not group_indexes:
+                            # This rule can never be satisfied
+                            model.Add(rb == 0)
+                        else:
+                            group_work = sum(
+                                x[(person_index, day, shift_code)]
+                                for person_index in group_indexes
+                                for shift_code in auto_shifts
+                            )
+                            model.Add(group_work >= min_count).OnlyEnforceIf(rb)
+                model.AddBoolOr(rule_bools)
 
     # Max consecutive work days
     max_consecutive = max(1, conditions.maxConsecutive)

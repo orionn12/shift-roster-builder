@@ -244,7 +244,12 @@ const defaultStructuredForm: StructuredForm = {
     },
   ],
   paidLeaves: [],
-  forbiddenRules: [{ person: '小代', weekday: '日曜', shift: 'C' }],
+  forbiddenRules: [
+    { person: '小代', weekday: '日曜', shift: 'C' },
+    { person: '小里', weekday: '土日祝', shift: '' },
+    { person: '古川', weekday: '土日祝', shift: '' },
+    { person: '今里', weekday: '土日祝', shift: '' },
+  ],
   specialNeeds: [
     { day: 20, shift: 'E', count: 5, zoneCodes: [] },
     { day: 21, shift: 'A', count: 3, zoneCodes: [] },
@@ -406,35 +411,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
 
   const targetWorkDaysByPerson: Record<string, number> = {}
 
-  const fixedWeekdayShifts: Record<string, string> = {}
-  const fixedDateShifts: Record<string, Record<number, string>> = {}
-  for (const rule of form.fixedRules) {
-    const shift = rule.shift.toUpperCase()
-    if (!shift) continue
-    const [yr, mo] = monthValue.split('-').map(Number)
-    for (const person of splitPeople(rule.people, staff)) {
-      fixedWeekdayShifts[person] = shift
-      fixedDateShifts[person] = {}
-      for (const day of getMonthDays(monthValue)) {
-        const date = new Date(yr, mo - 1, day)
-        const jsDay = date.getDay()
-        const isWeekendDay = jsDay === 0 || jsDay === 6
-        if (isWeekendDay) continue
-        const isHoliday = HolidayJp.isHoliday(date)
-        if (isHoliday && !rule.includeHolidays) continue
-        fixedDateShifts[person][day] = shift
-      }
-    }
-  }
-
-  const allowedShifts: Record<string, string[]> = {}
-  for (const rule of form.allowedRules) {
-    const shifts = splitShiftCodes(rule.shifts)
-    for (const person of splitPeople(rule.people, staff)) {
-      allowedShifts[person] = shifts
-    }
-  }
-
+  // 禁止設定を先に処理し forcedOffDates を確定させる（固定シフトの除外日に使用）
   const unavailableWeekdayShifts: Record<string, Record<string, string[]>> = {}
   const forbiddenAlwaysShifts: Record<string, string[]> = {}
   const forcedOffWeekdays: Record<string, string[]> = {}
@@ -452,6 +429,59 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
       forcedOffWeekdays[person] = [...(forcedOffWeekdays[person] ?? []), weekdayKey]
     } else if (!weekdayKey && shift) {
       forbiddenAlwaysShifts[person] = [...(forbiddenAlwaysShifts[person] ?? []), shift]
+    }
+  }
+
+  // forcedOffDates を事前に計算（固定シフト割り当てから除外するため）
+  const [_year, _month] = monthValue.split('-').map(Number)
+  const forcedOffDates: Record<string, number[]> = {}
+  const forcedOffDateSet: Record<string, Set<number>> = {}
+  for (const [person, weekdayKeys] of Object.entries(forcedOffWeekdays)) {
+    const dates: number[] = []
+    for (const day of getMonthDays(monthValue)) {
+      const date = new Date(_year, _month - 1, day)
+      const jsDay = date.getDay()
+      const mondayBased = (jsDay + 6) % 7
+      const holiday = HolidayJp.isHoliday(date)
+      const matched = weekdayKeys.some((key) =>
+        (key === '祝' && holiday) ||
+        (key === '土日' && (jsDay === 0 || jsDay === 6)) ||
+        (key === '土日祝' && (jsDay === 0 || jsDay === 6 || holiday)) ||
+        key === String(mondayBased),
+      )
+      if (matched) dates.push(day)
+    }
+    if (dates.length > 0) {
+      forcedOffDates[person] = dates
+      forcedOffDateSet[person] = new Set(dates)
+    }
+  }
+
+  // 固定シフト: 土日祝も含め全勤務日に適用（禁止設定でOFFになる日は除外）
+  const fixedWeekdayShifts: Record<string, string> = {}
+  const fixedDateShifts: Record<string, Record<number, string>> = {}
+  for (const rule of form.fixedRules) {
+    const shift = rule.shift.toUpperCase()
+    if (!shift) continue
+    const [yr, mo] = monthValue.split('-').map(Number)
+    for (const person of splitPeople(rule.people, staff)) {
+      fixedWeekdayShifts[person] = shift
+      fixedDateShifts[person] = {}
+      for (const day of getMonthDays(monthValue)) {
+        const date = new Date(yr, mo - 1, day)
+        const isHoliday = HolidayJp.isHoliday(date)
+        if (isHoliday && !rule.includeHolidays) continue
+        if (forcedOffDateSet[person]?.has(day)) continue
+        fixedDateShifts[person][day] = shift
+      }
+    }
+  }
+
+  const allowedShifts: Record<string, string[]> = {}
+  for (const rule of form.allowedRules) {
+    const shifts = splitShiftCodes(rule.shifts)
+    for (const person of splitPeople(rule.people, staff)) {
+      allowedShifts[person] = shifts
     }
   }
 
@@ -511,7 +541,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     minConsecutiveHolidays: form.minConsecutiveHolidays ?? 0,
     mustOneGroups: [],
     sameShiftGroups: [],
-    paidLeaves: {},
+    paidLeaves,
     targetWorkDays: undefined,
     targetWorkDaysByPerson,
     fixedWeekdayShifts,
@@ -530,28 +560,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     forcedOffWeekdays,
     requiredTransitionBreaks,
     autoShiftCodes: form.shifts.filter((s) => s.code.trim() && s.auto).map((s) => s.code.trim().toUpperCase()),
-    forcedOffDates: (() => {
-      const result: Record<string, number[]> = {}
-      const [year, month] = monthValue.split('-').map(Number)
-      for (const [person, weekdayKeys] of Object.entries(forcedOffWeekdays)) {
-        const dates: number[] = []
-        for (const day of getMonthDays(monthValue)) {
-          const date = new Date(year, month - 1, day)
-          const jsDay = date.getDay()
-          const mondayBased = (jsDay + 6) % 7
-          const holiday = HolidayJp.isHoliday(date)
-          const matched = weekdayKeys.some((key) =>
-            (key === '祝' && holiday) ||
-            (key === '土日' && (jsDay === 0 || jsDay === 6)) ||
-            (key === '土日祝' && (jsDay === 0 || jsDay === 6 || holiday)) ||
-            key === String(mondayBased),
-          )
-          if (matched) dates.push(day)
-        }
-        if (dates.length > 0) result[person] = dates
-      }
-      return result
-    })(),
+    forcedOffDates,
     holidayDates: getMonthDays(monthValue).filter((day) => {
       const [year, month] = monthValue.split('-').map(Number)
       return HolidayJp.isHoliday(new Date(year, month - 1, day))
