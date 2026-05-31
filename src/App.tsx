@@ -1251,6 +1251,27 @@ function App() {
 
     setIsSolving(true)
     try {
+      // 現在のスケジュールから PAID・特休・非autoシフト（手動入力）を fixedAssignments として収集
+      const fixedAssignments: Record<string, Record<number, string>> = {}
+      for (const person of staff) {
+        for (const day of days) {
+          const code = schedule[person]?.[day]
+          if (!code || code === 'OFF') continue
+          // PAID・特休は常に固定
+          if (code === 'PAID' || code === '特休') {
+            if (!fixedAssignments[person]) fixedAssignments[person] = {}
+            fixedAssignments[person][day] = code
+            continue
+          }
+          // 非autoシフトも手動入力として固定
+          const isAutoShift = parsedConditions.autoShiftCodes.includes(code)
+          if (!isAutoShift) {
+            if (!fixedAssignments[person]) fixedAssignments[person] = {}
+            fixedAssignments[person][day] = code
+          }
+        }
+      }
+
       const response = await fetch('/api/solve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1259,6 +1280,7 @@ function App() {
           month,
           conditions: parsedConditions,
           previousMonthTail: buildPreviousTail(month, staff, parsedConditions.maxConsecutive),
+          fixedAssignments,
         }),
       })
       if (!response.ok) throw new Error('CP-SATサーバーに接続できませんでした。')

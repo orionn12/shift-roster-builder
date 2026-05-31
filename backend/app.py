@@ -62,6 +62,7 @@ class SolveRequest(BaseModel):
     month: str
     conditions: Conditions
     previousMonthTail: dict[str, PreviousTail] = Field(default_factory=dict)
+    fixedAssignments: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class SolveResponse(BaseModel):
@@ -100,6 +101,7 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
     conditions = request.conditions
     holiday_set = set(conditions.holidayDates)
 
+    # auto=True のシフトのみを auto_shifts の基本セットとする
     auto_shift_set = {shift.code for shift in conditions.shifts.values() if shift.auto}
     if conditions.targetWorkDays is not None:
         for filler_shift in ("常勤", "日勤"):
@@ -108,10 +110,15 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
     auto_shift_set.update(conditions.fixedWeekdayShifts.values())
     for allowed in conditions.allowedShifts.values():
         auto_shift_set.update(allowed)
-    # Also include shifts referenced in fixedDateShifts
+    # fixedDateShifts に含まれる非autoシフトも auto_shifts に追加する（そのスタッフのみで使用）
     for day_shifts in conditions.fixedDateShifts.values():
         auto_shift_set.update(day_shifts.values())
+    # fixedAssignments に含まれる非autoシフトも auto_shifts に追加する（そのスタッフのみで使用）
+    for day_shifts in request.fixedAssignments.values():
+        auto_shift_set.update(day_shifts.values())
     auto_shifts = sorted(shift for shift in auto_shift_set if shift in conditions.shifts)
+    # 非autoシフトのセット（per-personの allowed 計算に使用）
+    non_auto_shifts = {code for code in auto_shifts if not conditions.shifts[code].auto}
     previous_tail = request.previousMonthTail
 
     if not staff:
@@ -141,9 +148,24 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
 
     for person_index, person in enumerate(staff):
         paid_days = set(conditions.paidLeaves.get(person, []))
-        allowed = set(conditions.allowedShifts.get(person, auto_shifts))
+        # 非autoシフトはその人の fixedDateShifts / fixedWeekdayShifts にあるものだけ許可
+        person_allowed_non_auto = set()
+        for v in conditions.fixedDateShifts.get(person, {}).values():
+            if v in non_auto_shifts:
+                person_allowed_non_auto.add(v)
+        fw = conditions.fixedWeekdayShifts.get(person)
+        if fw and fw in non_auto_shifts:
+            person_allowed_non_auto.add(fw)
+        # fixedAssignments にある非autoシフトも許可
+        for v in request.fixedAssignments.get(person, {}).values():
+            if v in non_auto_shifts:
+                person_allowed_non_auto.add(v)
+        base_allowed = set(conditions.allowedShifts.get(person, auto_shifts))
+        # 非autoシフトのうちこの人に許可されていないものを除外
+        allowed = {s for s in base_allowed if s not in non_auto_shifts or s in person_allowed_non_auto}
         fixed_weekday_shift = conditions.fixedWeekdayShifts.get(person)
         fixed_date_shifts = {int(k): v for k, v in conditions.fixedDateShifts.get(person, {}).items()}
+        person_fixed_assignments = {int(k): v for k, v in request.fixedAssignments.get(person, {}).items()}
         forbidden_always = set(conditions.forbiddenAlwaysShifts.get(person, []))
         forced_off_dates = set(conditions.forcedOffDates.get(person, []))
         unavailable_by_weekday = conditions.unavailableWeekdayShifts.get(person, {})
@@ -152,6 +174,11 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
             work_vars = [x[(person_index, day, shift_code)] for shift_code in auto_shifts]
             model.Add(sum(work_vars) <= 1)
             model.Add(work_day[(person_index, day)] == sum(work_vars))
+
+            # fixedAssignments: PAID/特休/手動シフト → ソルバーは触らない (OFF扱い)
+            if day in person_fixed_assignments:
+                model.Add(sum(work_vars) == 0)
+                continue
 
             # PAID days → OFF (no auto shift)
             if day in paid_days:
@@ -316,6 +343,16 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
                             work_day[(person_index, month_info.days[j])]
                             <= sum(work_day[(person_index, month_info.days[k])] for k in range(j))
                         )
+            # Month-end boundary: assume next month starts with work (conservative),
+            # so an OFF run ending at month-end must be >= min_holidays days.
+            for j in range(1, min_holidays):
+                if j + 1 <= len(month_info.days):
+                    # If days[-(j+1)] is working, at least one of days[-j:] must be working
+                    # (prevents isolated OFF run of length j at month end)
+                    model.Add(
+                        work_day[(person_index, month_info.days[-(j + 1)])]
+                        <= sum(work_day[(person_index, month_info.days[-k])] for k in range(1, j + 1))
+                    )
 
     # Previous month tail (max consecutive rollover)
     for person_index, person in enumerate(staff):
@@ -437,9 +474,13 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
     for person_index, person in enumerate(staff):
         paid_days = set(conditions.paidLeaves.get(person, []))
         fixed_date_shifts = {int(k): v for k, v in conditions.fixedDateShifts.get(person, {}).items()}
+        person_fixed_assignments = {int(k): v for k, v in request.fixedAssignments.get(person, {}).items()}
         schedule[person] = {}
         for day in month_info.days:
-            if day in paid_days:
+            if day in person_fixed_assignments:
+                # fixedAssignments は絶対厳守（PAID・特休・手動シフト）
+                assigned = person_fixed_assignments[day]
+            elif day in paid_days:
                 assigned = "PAID"
             elif day in fixed_date_shifts and fixed_date_shifts[day] not in auto_shifts:
                 # Fixed shift not in solver domain: assign directly

@@ -60,5 +60,9 @@
     "sameShiftGroups": [],
     "targetWorkDaysByPerson": {}
   },
-  "previousMonthTail": {}
+  "previousMonthTail": {},
+  "fixedAssignments": {
+    "小伏": { "10": "PAID", "19": "PAID" },
+    "川田": { "8": "PAID" }
+  }
 }

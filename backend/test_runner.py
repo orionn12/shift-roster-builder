@@ -203,6 +203,51 @@ def assert_transition_breaks(request: SolveRequest, schedule) -> list[dict]:
     return results
 
 
+def assert_no_non_auto_leakage(request: SolveRequest, schedule) -> list[dict]:
+    """非autoシフトが固定外のスタッフに割り当てられていないことを確認する"""
+    auto_codes = set(request.conditions.autoShiftCodes)
+    violations: list[str] = []
+    for person in request.staff:
+        # このスタッフに許可された非autoシフト（fixedDateShifts / fixedWeekdayShifts / fixedAssignments）
+        allowed_non_auto: set[str] = set()
+        for v in request.conditions.fixedDateShifts.get(person, {}).values():
+            if v not in auto_codes:
+                allowed_non_auto.add(v)
+        fw = request.conditions.fixedWeekdayShifts.get(person)
+        if fw and fw not in auto_codes:
+            allowed_non_auto.add(fw)
+        for v in request.fixedAssignments.get(person, {}).values():
+            if v not in auto_codes:
+                allowed_non_auto.add(v)
+        for day_str, code in schedule.get(person, {}).items():
+            if code in auto_codes or code in ("OFF", "PAID", "特休"):
+                continue
+            if code not in allowed_non_auto:
+                violations.append(f"{person} day {day_str}: {code}")
+    return [check(
+        "非autoシフト漏洩なし",
+        not violations,
+        "; ".join(violations[:5]) if violations else "OK",
+    )]
+
+
+def assert_fixed_assignments(request: SolveRequest, schedule) -> list[dict]:
+    """fixedAssignments で指定した日のシフトが保持されているか確認する"""
+    results = []
+    for person, day_map in request.fixedAssignments.items():
+        violations: list[str] = []
+        for day_str, expected in day_map.items():
+            actual = schedule.get(person, {}).get(day_str, "OFF")
+            if actual != expected:
+                violations.append(f"day {day_str}: expected {expected}, got {actual}")
+        results.append(check(
+            f"{person} fixedAssignments",
+            not violations,
+            "; ".join(violations[:3]) if violations else f"{len(day_map)}日すべて正常",
+        ))
+    return results
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def run(fixture_path: str) -> bool:
@@ -228,6 +273,8 @@ def run(fixture_path: str) -> bool:
         results += assert_staffing(request, schedule)
         results += assert_forbidden_weekday_shifts(request, schedule)
         results += assert_transition_breaks(request, schedule)
+        results += assert_no_non_auto_leakage(request, schedule)
+        results += assert_fixed_assignments(request, schedule)
 
     passed = sum(1 for r in results if r["passed"])
     total = len(results)
