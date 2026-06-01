@@ -50,6 +50,7 @@ class Conditions(BaseModel):
     preferLeader: bool = False
     coverageRules: list[dict[str, Any]] = Field(default_factory=list)
     staffAttributes: dict[str, str] = Field(default_factory=dict)
+    excludedAttributes: list[str] = Field(default_factory=list)
 
 
 class PreviousTail(BaseModel):
@@ -230,13 +231,18 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
             )
 
     # Daily staffing needs
+    staffing_count_indexes = [
+        index
+        for index, person in enumerate(staff)
+        if conditions.staffAttributes.get(person, "") not in set(conditions.excludedAttributes)
+    ]
     for day in month_info.days:
         weekday = calendar.weekday(month_info.year, month_info.month, day)
         is_holiday = day in holiday_set
         for shift_code in auto_shifts:
             needed = needed_staff_count(month_info, day, shift_code, conditions, weekday, is_holiday)
             needed = conditions.dateNeed.get(day, {}).get(shift_code, needed)
-            model.Add(sum(x[(person_index, day, shift_code)] for person_index in range(len(staff))) >= needed)
+            model.Add(sum(x[(person_index, day, shift_code)] for person_index in staffing_count_indexes) >= needed)
 
     # Leadership coverage
     if conditions.requireLeadershipCoverage:
@@ -812,11 +818,17 @@ def assess_schedule_quality(
             })
 
     holiday_set = set(conditions.holidayDates)
+    excluded_attributes = set(conditions.excludedAttributes)
+    staffing_count_staff = [
+        person
+        for person in staff
+        if conditions.staffAttributes.get(person, "") not in excluded_attributes
+    ]
     for day in month_info.days:
         weekday = calendar.weekday(month_info.year, month_info.month, day)
         is_holiday = day in holiday_set
         shift_counts = {
-            shift: sum(1 for person in staff if code_for(person, day) == shift)
+            shift: sum(1 for person in staffing_count_staff if code_for(person, day) == shift)
             for shift in auto_shifts
         }
         needed = {
@@ -844,6 +856,7 @@ def assess_schedule_quality(
             "shiftCounts": shift_counts,
             "needed": needed,
             "workingTotal": sum(1 for person in staff if is_work(code_for(person, day))),
+            "countedWorkingTotal": sum(1 for person in staffing_count_staff if is_work(code_for(person, day))),
         }
 
     work_counts: dict[str, int] = {}

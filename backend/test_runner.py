@@ -120,6 +120,11 @@ def assert_staffing(request: SolveRequest, schedule) -> list[dict]:
     days = list(range(1, last_day + 1))
     conditions = request.conditions
     holiday_set = set(conditions.holidayDates)
+    counted_staff = [
+        person
+        for person in request.staff
+        if conditions.staffAttributes.get(person, "") not in set(conditions.excludedAttributes)
+    ]
 
     shortfalls: list[str] = []
     for day in days:
@@ -139,7 +144,7 @@ def assert_staffing(request: SolveRequest, schedule) -> list[dict]:
             if actual_need == 0:
                 continue
             count = sum(
-                1 for p in request.staff
+                1 for p in counted_staff
                 if schedule.get(p, {}).get(str(day)) == shift_code
             )
             if count < actual_need:

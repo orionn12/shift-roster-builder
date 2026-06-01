@@ -62,6 +62,7 @@ type ParsedConditions = {
   preferLeader: boolean
   coverageRules: CoverageRuleForm[]
   staffAttributes: Record<string, string>
+  excludedAttributes: string[]
   unavailableWeekdayShifts: Record<string, Record<string, string[]>>
   forbiddenAlwaysShifts: Record<string, string[]>
   forcedOffWeekdays: Record<string, string[]>
@@ -88,11 +89,6 @@ type FixedRuleForm = {
 type AllowedRuleForm = {
   people: string
   shifts: string
-}
-
-type PaidLeaveForm = {
-  person: string
-  days: string
 }
 
 type ForbiddenRuleForm = {
@@ -126,8 +122,8 @@ type StructuredForm = {
   allowedRules: AllowedRuleForm[]
   attributes: AttributeForm[]
   staffAttributes: Record<string, string>
+  excludedAttributes: string[]
   coverageRules: CoverageRuleForm[]
-  paidLeaves: PaidLeaveForm[]
   forbiddenRules: ForbiddenRuleForm[]
   specialNeeds: SpecialNeedForm[]
 }
@@ -141,9 +137,9 @@ type SolveReport = {
 }
 
 type SavedRoster = {
+  schemaVersion?: number
   month: string
   staff: string[]
-  conditionRows: string[]
   structuredForm?: StructuredForm
   schedule: Schedule
   manualAssignments?: ManualAssignments
@@ -160,100 +156,24 @@ type ResultNotice = {
   message: string
 }
 
-const defaultStaff = [
-  '小里',
-  '松本',
-  '小伏',
-  '川田',
-  '梅崎',
-  '浅山',
-  '姫島',
-  '田上',
-  '竹井',
-  '麻生',
-  '三輪',
-  '高松',
-  '芦原',
-  '古川',
-  '杉山',
-  '高田',
-  '高橋',
-  '田島',
-  '岩田',
-  '近藤',
-  '今里',
-  '原口',
-  '吉瀬',
-]
-
-const defaultConditions = [
-  'A勤務 7:00～16:00 平日3人 土日1人',
-  'C勤務 15:00～0:00 平日4人 土日1人',
-  'E勤務 23:00～8:00 平日4人 土日1人',
-  'D勤務 20:00～5:00 手動入力',
-  '最大連勤5日',
-  '小里 松本 田上 のうち必ず1人',
-  '高田 高橋 は常に同一勤務',
-]
+const defaultStaff: string[] = []
 
 const defaultStructuredForm: StructuredForm = {
   shifts: [
-    { code: 'A', time: '7:00-16:00', auto: true },
-    { code: 'C', time: '15:00-0:00', auto: true },
-    { code: 'E', time: '23:00-8:00', auto: true },
-    { code: 'D', time: '20:00-5:00', auto: false },
-    { code: '常勤', time: '9:00-18:00', auto: false },
   ],
-  staffing: {
-    A: { weekday: 4, saturday: 2, sunday: 2, holiday: 2, weekdayZones: [], saturdayZones: [], sundayZones: [], holidayZones: [] },
-    C: { weekday: 2, saturday: 2, sunday: 2, holiday: 2, weekdayZones: [], saturdayZones: [], sundayZones: [], holidayZones: [] },
-    E: { weekday: 4, saturday: 2, sunday: 2, holiday: 2, weekdayZones: [], saturdayZones: [], sundayZones: [], holidayZones: [] },
-  },
-  maxConsecutive: 6,
+  staffing: {},
+  maxConsecutive: 5,
   minConsecutiveHolidays: 2,
   preferSameShiftStreaks: true,
   preferConsecutiveHolidays: true,
-  fixedRules: [
-    { people: '小里', shift: '常勤', includeHolidays: true },
-    { people: '古川 今里', shift: 'A', includeHolidays: true },
-  ],
-  allowedRules: [{ people: '松本', shifts: 'A C' }],
-  attributes: [{ name: 'リーダー' }, { name: 'サブリーダー' }, { name: '新人' }],
-  staffAttributes: {
-    松本: 'リーダー',
-    小代: 'リーダー',
-    川田: 'リーダー',
-    楢崎: 'リーダー',
-    浅山: 'リーダー',
-    姫島: 'サブリーダー',
-    竹井: 'サブリーダー',
-    田上: 'サブリーダー',
-    麻生: 'サブリーダー',
-    三輪: 'サブリーダー',
-    高松: 'サブリーダー',
-    古瀬: '新人',
-    原口: '新人',
-  },
-  coverageRules: [
-    {
-      label: 'リーダー/サブリーダー必須',
-      conditions: [
-        { attribute: 'リーダー', count: 1 },
-        { attribute: 'サブリーダー', count: 1 },
-      ],
-    },
-  ],
-  paidLeaves: [],
-  forbiddenRules: [
-    { person: '小代', weekday: '日曜', shift: 'C' },
-    { person: '小里', weekday: '土日祝', shift: '' },
-    { person: '古川', weekday: '土日祝', shift: '' },
-    { person: '今里', weekday: '土日祝', shift: '' },
-  ],
-  specialNeeds: [
-    { day: 20, shift: 'E', count: 5, zoneCodes: [] },
-    { day: 21, shift: 'A', count: 3, zoneCodes: [] },
-  ],
+  fixedRules: [],
+  allowedRules: [],
+  attributes: [],
+  staffAttributes: {},
+  excludedAttributes: [],
+  coverageRules: [],
+  forbiddenRules: [],
+  specialNeeds: [],
 }
 
 const baseShiftClasses = ['shift-a', 'shift-c', 'shift-e', 'shift-d', 'shift-x']
@@ -346,24 +266,8 @@ function splitShiftCodes(value: string) {
   return normalizeLine(value).split(/[,\s、/]+/).filter(Boolean).map((code) => code.toUpperCase())
 }
 
-function daysInLine(line: string) {
-  return [...line.matchAll(/(\d{1,2})\s*日?/g)]
-    .map((match) => Number(match[1]))
-    .filter((day) => day > 0 && day <= 31)
-}
 
-function parseCount(line: string, label: string) {
-  const match = line.match(
-    new RegExp(`${label}(?:祝)?\\s*(?:最低|最少|少なくとも|最低でも|以上)?\\s*(\\d+)\\s*(?:人|名)`),
-  )
-  return match ? Number(match[1]) : undefined
-}
 
-function shiftCodesInLine(line: string) {
-  return Array.from(line.matchAll(/([A-Z]|常勤|日勤|早番|遅番|夜勤)\s*(?:勤務|勤)?/gi)).map((match) =>
-    match[1].toUpperCase(),
-  )
-}
 
 const weekdayNameToIndex: Record<string, number> = {
   月曜: 0,
@@ -382,32 +286,10 @@ const weekdayNameToIndex: Record<string, number> = {
   日曜日: 6,
 }
 
-function weekdayKeyInLine(line: string) {
-  const found = Object.entries(weekdayNameToIndex).find(([label]) => line.includes(label))
-  return found ? String(found[1]) : undefined
-}
 
-function nthWeekdayDay(monthValue: string, weekday: number, nth: number) {
-  const [year, month] = monthValue.split('-').map(Number)
-  let count = 0
-  for (const day of getMonthDays(monthValue)) {
-    const jsDay = new Date(year, month - 1, day).getDay()
-    const mondayBased = (jsDay + 6) % 7
-    if (mondayBased === weekday) {
-      count += 1
-      if (count === nth) return day
-    }
-  }
-  return undefined
-}
 
 function buildConditionsFromForm(form: StructuredForm, staff: string[], monthValue: string): ParsedConditions {
   const paidLeaves: Record<string, number[]> = {}
-  for (const paidLeave of form.paidLeaves) {
-    const person = paidLeave.person.trim()
-    if (!person) continue
-    paidLeaves[person] = daysInLine(paidLeave.days)
-  }
 
   const targetWorkDaysByPerson: Record<string, number> = {}
 
@@ -558,6 +440,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     preferLeader: false,
     coverageRules: form.coverageRules,
     staffAttributes: form.staffAttributes,
+    excludedAttributes: (form.excludedAttributes ?? []).filter((attribute) => attribute.trim()),
     unavailableWeekdayShifts,
     forbiddenAlwaysShifts,
     forcedOffWeekdays,
@@ -573,209 +456,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
   }
 }
 
-function countForShift(line: string, shift: string) {
-  const match = line.match(new RegExp(`${shift}\\s*(?:勤務|勤)?\\s*(\\d+)\\s*(?:人|名)`))
-  return match ? Number(match[1]) : undefined
-}
 
-function parseConditions(lines: string[], staff: string[], monthValue = '2026-06'): ParsedConditions {
-  const parsed: ParsedConditions = {
-    shifts: {},
-    weekdayNeed: {},
-    saturdayNeed: {},
-    sundayNeed: {},
-    holidayNeed: {},
-    weekendNeed: {},
-    dailyNeed: {},
-    maxConsecutive: 5,
-    minConsecutiveHolidays: 0,
-    mustOneGroups: [],
-    sameShiftGroups: [],
-    paidLeaves: {},
-    targetWorkDays: undefined,
-    targetWorkDaysByPerson: {},
-    fixedWeekdayShifts: {},
-    fixedDateShifts: {},
-    allowedShifts: {},
-    preferConsecutiveHolidays: false,
-    leaderGroup: [],
-    subLeaderGroup: [],
-    newcomerGroup: [],
-    requireLeadershipCoverage: false,
-    preferLeader: false,
-    coverageRules: [],
-    staffAttributes: {},
-    unavailableWeekdayShifts: {},
-    forbiddenAlwaysShifts: {},
-    forcedOffWeekdays: {},
-    requiredTransitionBreaks: [],
-    autoShiftCodes: [],
-    forcedOffDates: {},
-    holidayDates: [],
-    dateNeed: {},
-    preferSameShiftStreaks: false,
-  }
-  let holidayCount: number | undefined
-  let paidExcludedFromHolidayCount = false
-
-  for (const rawLine of lines) {
-    const line = normalizeLine(rawLine)
-    if (!line) continue
-
-    const shiftMatch = line.match(/([A-Z]|常勤|日勤|早番|遅番|夜勤)\s*(?:勤務|勤)?/i)
-    if (shiftMatch) {
-      const code = shiftMatch[1].toUpperCase()
-      const time = line.match(/(\d{1,2}:\d{2})\s*[-~]\s*(\d{1,2}:\d{2})/)
-      const manual = /手動|入力のみ|自動.*しない/.test(line)
-      const linePeople = peopleInLine(line, staff)
-      parsed.shifts[code] = {
-        code,
-        time: time ? `${time[1]}-${time[2]}` : parsed.shifts[code]?.time ?? '',
-        auto: !manual,
-      }
-
-      const weekday = parseCount(line, '平日')
-      const weekend = parseCount(line, '土日') ?? parseCount(line, '土日祝') ?? parseCount(line, '休日')
-      const daily = parseCount(line, '毎日') ?? parseCount(line, '日勤') ?? parseCount(line, '日')
-      if (weekday !== undefined) parsed.weekdayNeed[code] = weekday
-      if (weekend !== undefined) parsed.weekendNeed[code] = weekend
-      if (daily !== undefined && weekday === undefined && weekend === undefined) {
-        parsed.dailyNeed[code] = daily
-      }
-      if (linePeople.length === 0 || time || manual || weekday !== undefined || weekend !== undefined || daily !== undefined) {
-        continue
-      }
-    }
-
-    const maxMatch = line.match(/最大連勤\s*(\d+)\s*日?/)
-    if (maxMatch) {
-      parsed.maxConsecutive = Math.max(1, Number(maxMatch[1]))
-      continue
-    }
-
-    const workDaysMatch = line.match(/(?:勤務日数|出勤日数|出勤)\s*(?:は|を|=|:)?\s*(\d+)\s*日/)
-    if (workDaysMatch) {
-      parsed.targetWorkDays = Number(workDaysMatch[1])
-      continue
-    }
-
-    if (/連休|休日.*連続|休み.*連続|休日.*まとめ|休み.*まとめ/.test(line)) {
-      parsed.preferConsecutiveHolidays = true
-      continue
-    }
-
-    if (/勤務.*切り替わる.*避け|勤務.*切替.*避け|同じ勤務.*続/.test(line)) {
-      parsed.preferSameShiftStreaks = true
-      continue
-    }
-
-    const holidayMatch = line.match(/(?:休日|休み)\s*(?:は|を|=|:)?\s*(\d+)\s*日(?!に)/)
-    if (holidayMatch) {
-      holidayCount = Number(holidayMatch[1])
-      paidExcludedFromHolidayCount = /有給除く|有休除く/.test(line)
-      parsed.targetWorkDays = Math.max(0, getMonthDays(monthValue).length - holidayCount)
-      continue
-    }
-
-    const leaderMatch = line.match(/^リーダーは(.+)$/)
-    if (leaderMatch) {
-      parsed.leaderGroup = peopleInLine(leaderMatch[1], staff)
-      continue
-    }
-
-    const subLeaderMatch = line.match(/^サブリーダーは(.+)$/)
-    if (subLeaderMatch) {
-      parsed.subLeaderGroup = peopleInLine(subLeaderMatch[1], staff)
-      continue
-    }
-
-    if (/リーダー.*サブリーダー.*必須/.test(line)) {
-      parsed.requireLeadershipCoverage = true
-      continue
-    }
-
-    const thirdSunday = nthWeekdayDay(monthValue, 6, 3)
-    if (thirdSunday && /第三日曜前の土曜日|第三日曜日前の土曜日/.test(line)) {
-      const shift = shiftCodesInLine(line)[0]
-      const count = shift ? countForShift(line, shift) : undefined
-      if (shift && count) parsed.dateNeed[thirdSunday - 1] = { ...(parsed.dateNeed[thirdSunday - 1] ?? {}), [shift]: count }
-      continue
-    }
-
-    if (thirdSunday && /第三日曜|第三日曜日/.test(line)) {
-      const shift = shiftCodesInLine(line)[0]
-      const count = shift ? countForShift(line, shift) : undefined
-      if (shift && count) parsed.dateNeed[thirdSunday] = { ...(parsed.dateNeed[thirdSunday] ?? {}), [shift]: count }
-      continue
-    }
-
-    const people = peopleInLine(line, staff)
-    if (/有給|有休|休暇/.test(line) && people.length >= 1) {
-      const leaveDays = daysInLine(line)
-      for (const person of people) {
-        parsed.paidLeaves[person] = Array.from(
-          new Set([...(parsed.paidLeaves[person] ?? []), ...leaveDays]),
-        ).sort((left, right) => left - right)
-      }
-      continue
-    }
-
-    if (/必ず\s*1\s*人|誰か\s*1\s*人|1\s*人.*必要/.test(line) && people.length >= 2) {
-      parsed.mustOneGroups.push(people)
-      continue
-    }
-
-    if (/同一勤務|同じ勤務|一緒|ペア|セット/.test(line) && people.length >= 2) {
-      parsed.sameShiftGroups.push(people)
-      continue
-    }
-
-    const mentionedShiftCodes = shiftCodesInLine(line)
-    for (const code of mentionedShiftCodes) {
-      if (!parsed.shifts[code]) parsed.shifts[code] = { code, time: '', auto: true }
-    }
-
-    if (people.length >= 1 && mentionedShiftCodes.length >= 2 && /or|OR|または|どちらか/.test(line)) {
-      for (const person of people) parsed.allowedShifts[person] = mentionedShiftCodes
-      continue
-    }
-
-    if (people.length >= 1 && mentionedShiftCodes.length >= 1 && /固定|月\s*-\s*金|月\s*~\s*金|月金|平日/.test(line)) {
-      for (const person of people) parsed.fixedWeekdayShifts[person] = mentionedShiftCodes[0]
-      continue
-    }
-
-    const weekdayKey = weekdayKeyInLine(line)
-    if (people.length >= 1 && mentionedShiftCodes.length >= 1 && weekdayKey && /なし|禁止|不可/.test(line)) {
-      for (const person of people) {
-        parsed.unavailableWeekdayShifts[person] = {
-          ...(parsed.unavailableWeekdayShifts[person] ?? {}),
-          [weekdayKey]: [...(parsed.unavailableWeekdayShifts[person]?.[weekdayKey] ?? []), ...mentionedShiftCodes],
-        }
-      }
-    }
-  }
-
-  const hasPaidExcluded = /有給除く|有休除く/.test(lines.join('\n'))
-  if (holidayCount !== undefined && paidExcludedFromHolidayCount) {
-    const daysInMonth = getMonthDays(monthValue).length
-    parsed.targetWorkDaysByPerson = Object.fromEntries(
-      staff.map((person) => [
-        person,
-        Math.max(0, daysInMonth - holidayCount - (parsed.paidLeaves[person]?.length ?? 0)),
-      ]),
-    )
-  } else if (parsed.targetWorkDays !== undefined && hasPaidExcluded) {
-    parsed.targetWorkDaysByPerson = Object.fromEntries(
-      staff.map((person) => [
-        person,
-        Math.max(0, parsed.targetWorkDays! - (parsed.paidLeaves[person]?.length ?? 0)),
-      ]),
-    )
-  }
-
-  return parsed
-}
 
 function getShiftClass(code: string) {
   if (code === 'OFF') return 'shift-off'
@@ -828,13 +509,12 @@ function sanitizeSchedule(
   const next = mergeScheduleShape(current, staff, days)
   const autoCodes = new Set(conditions.autoShiftCodes)
   for (const person of staff) {
-    const paidDays = new Set(conditions.paidLeaves[person] ?? [])
     const fixedDates = conditions.fixedDateShifts[person] ?? {}
     const fixedWeekdayShift = conditions.fixedWeekdayShifts[person]
     for (const day of days) {
       const code = next[person]?.[day] ?? 'OFF'
       const manualCode = manualAssignments[person]?.[day]
-      if (code === 'PAID' && !paidDays.has(day) && fixedDates[day] !== 'PAID') {
+      if (code === 'PAID' && manualCode !== 'PAID' && fixedDates[day] !== 'PAID') {
         next[person][day] = 'OFF'
         continue
       }
@@ -862,15 +542,12 @@ function buildFixedAssignmentsForSolve(
   current: ManualAssignments,
   staff: string[],
   days: number[],
-  conditions: ParsedConditions,
 ): ManualAssignments {
   const pruned = pruneManualAssignments(current, staff, days)
   const next: ManualAssignments = {}
   for (const person of staff) {
-    const paidDays = new Set(conditions.paidLeaves[person] ?? [])
     for (const [dayText, code] of Object.entries(pruned[person] ?? {})) {
       const day = Number(dayText)
-      if (code === 'PAID' && !paidDays.has(day)) continue
       if (!next[person]) next[person] = {}
       next[person][day] = code
     }
@@ -892,8 +569,43 @@ function writeSavedRosters(saved: Record<string, SavedRoster>) {
   localStorage.setItem(savedRostersKey, JSON.stringify(saved))
 }
 
+function migrateSavedRosters(saved: Record<string, SavedRoster>): Record<string, SavedRoster> {
+  return Object.fromEntries(
+    Object.entries(saved).map(([key, roster]) => {
+      const { conditionRows: _conditionRows, ...cleanRoster } = roster as SavedRoster & { conditionRows?: unknown }
+      const structuredForm = cleanRoster.structuredForm
+        ? (() => {
+            const { paidLeaves: _paidLeaves, ...rest } = cleanRoster.structuredForm as StructuredForm & { paidLeaves?: unknown }
+            return rest
+          })()
+        : undefined
+      if (cleanRoster.schemaVersion === 2) return [key, { ...cleanRoster, structuredForm }]
+      const stripAssignments = (assignments: Record<string, Record<number, string>> | undefined) =>
+        Object.fromEntries(
+          Object.entries(assignments ?? {}).flatMap(([person, dayMap]) => {
+            const kept = Object.fromEntries(
+              Object.entries(dayMap).filter(([, code]) => code !== 'PAID'),
+            )
+            return Object.keys(kept).length > 0 ? [[person, kept]] : []
+          }),
+        )
+      const conditions = buildConditionsFromForm(structuredForm ?? defaultStructuredForm, cleanRoster.staff, cleanRoster.month)
+      return [
+        key,
+        {
+          ...cleanRoster,
+          schemaVersion: 2,
+          structuredForm,
+          manualAssignments: stripAssignments(cleanRoster.manualAssignments),
+          schedule: sanitizeSchedule(cleanRoster.schedule, cleanRoster.staff, getMonthDays(cleanRoster.month), conditions, {}),
+        },
+      ]
+    }),
+  )
+}
+
 function buildPreviousTail(monthValue: string, staff: string[], maxConsecutive: number): PreviousTail {
-  const previous = readSavedRosters()[previousMonthValue(monthValue)]
+  const previous = migrateSavedRosters(readSavedRosters())[previousMonthValue(monthValue)]
   if (!previous) return {}
   const previousDays = getMonthDays(previous.month)
   const tail: PreviousTail = {}
@@ -937,7 +649,6 @@ function App() {
   const [month, setMonth] = useState('2026-06')
   const [staff, setStaff] = useState(defaultStaff)
   const [newStaff, setNewStaff] = useState('')
-  const [conditionRows, setConditionRows] = useState(defaultConditions)
   const [structuredForm, setStructuredForm] = useState<StructuredForm>(defaultStructuredForm)
   const [isPanelOpen, setIsPanelOpen] = useState(true)
   const [isSolving, setIsSolving] = useState(false)
@@ -945,7 +656,11 @@ function App() {
   const [lastReport, setLastReport] = useState<SolveReport | null>(null)
   const [isReportOpen, setIsReportOpen] = useState(false)
   const [resultNotice, setResultNotice] = useState<ResultNotice | null>(null)
-  const [savedMonths, setSavedMonths] = useState(() => Object.keys(readSavedRosters()).sort())
+  const [savedMonths, setSavedMonths] = useState(() => {
+    const migrated = migrateSavedRosters(readSavedRosters())
+    writeSavedRosters(migrated)
+    return Object.keys(migrated).sort()
+  })
   const parsedConditions = useMemo(
     () => buildConditionsFromForm(structuredForm, staff, month),
     [structuredForm, staff, month],
@@ -956,15 +671,14 @@ function App() {
   const [manualAssignments, setManualAssignments] = useState<ManualAssignments>({})
 
   const days = useMemo(() => getMonthDays(month), [month])
-  const hasPaidLeaveSetting = Object.values(parsedConditions.paidLeaves).some((leaveDays) => leaveDays.length > 0)
   const allShiftOptions = useMemo(
     () => [
       'OFF',
-      ...(hasPaidLeaveSetting ? ['PAID'] : []),
+      'PAID',
       '特休',
       ...structuredForm.shifts.filter((s) => s.code.trim()).map((s) => s.code.trim().toUpperCase()).sort(),
     ],
-    [hasPaidLeaveSetting, structuredForm.shifts],
+    [structuredForm.shifts],
   )
   const visibleSchedule = useMemo(
     () => sanitizeSchedule(schedule, staff, days, parsedConditions, manualAssignments),
@@ -1033,15 +747,6 @@ function App() {
     }))
   }
 
-  const updatePaidLeave = (index: number, patch: Partial<PaidLeaveForm>) => {
-    setStructuredForm((current) => ({
-      ...current,
-      paidLeaves: current.paidLeaves.map((rule, ruleIndex) =>
-        ruleIndex === index ? { ...rule, ...patch } : rule,
-      ),
-    }))
-  }
-
   const updateForbiddenRule = (index: number, patch: Partial<ForbiddenRuleForm>) => {
     setStructuredForm((current) => ({
       ...current,
@@ -1089,6 +794,22 @@ function App() {
     setStructuredForm((current) => ({
       ...current,
       staffAttributes: { ...current.staffAttributes, [person]: attribute },
+    }))
+  }
+
+  const updateExcludedAttribute = (index: number, value: string) => {
+    setStructuredForm((current) => ({
+      ...current,
+      excludedAttributes: (current.excludedAttributes ?? []).map((attribute, attributeIndex) =>
+        attributeIndex === index ? value : attribute,
+      ),
+    }))
+  }
+
+  const addExcludedAttribute = () => {
+    setStructuredForm((current) => ({
+      ...current,
+      excludedAttributes: [...(current.excludedAttributes ?? []), ''],
     }))
   }
 
@@ -1151,10 +872,6 @@ function App() {
         return { ...rule, conditions: next }
       }),
     }))
-  }
-
-  const addPaidLeave = () => {
-    setStructuredForm((current) => ({ ...current, paidLeaves: [...current.paidLeaves, { person: '', days: '' }] }))
   }
 
   const addForbiddenRule = () => {
@@ -1246,17 +963,6 @@ function App() {
     })
   }
 
-  const removePaidLeave = (index: number) => {
-    setStructuredForm((c) => ({ ...c, paidLeaves: c.paidLeaves.filter((_, i) => i !== index) }))
-  }
-  const insertPaidLeave = (index: number) => {
-    setStructuredForm((c) => {
-      const next = [...c.paidLeaves]
-      next.splice(index + 1, 0, { person: '', days: '' })
-      return { ...c, paidLeaves: next }
-    })
-  }
-
   const removeForbiddenRule = (index: number) => {
     setStructuredForm((c) => ({ ...c, forbiddenRules: c.forbiddenRules.filter((_, i) => i !== index) }))
   }
@@ -1265,6 +971,20 @@ function App() {
       const next = [...c.forbiddenRules]
       next.splice(index + 1, 0, { person: '', weekday: '日曜', shift: '' })
       return { ...c, forbiddenRules: next }
+    })
+  }
+
+  const removeExcludedAttribute = (index: number) => {
+    setStructuredForm((c) => ({
+      ...c,
+      excludedAttributes: (c.excludedAttributes ?? []).filter((_, i) => i !== index),
+    }))
+  }
+  const insertExcludedAttribute = (index: number) => {
+    setStructuredForm((c) => {
+      const next = [...(c.excludedAttributes ?? [])]
+      next.splice(index + 1, 0, '')
+      return { ...c, excludedAttributes: next }
     })
   }
 
@@ -1288,12 +1008,12 @@ function App() {
 
   const saveCurrentRoster = () => {
     const saved = readSavedRosters()
-    const cleanManualAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days, parsedConditions)
+    const cleanManualAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days)
     const cleanSchedule = sanitizeSchedule(visibleSchedule, staff, days, parsedConditions, cleanManualAssignments)
     saved[month] = {
+      schemaVersion: 2,
       month,
       staff,
-      conditionRows,
       structuredForm,
       schedule: cleanSchedule,
       manualAssignments: cleanManualAssignments,
@@ -1311,7 +1031,10 @@ function App() {
   }
 
   const loadCurrentRoster = () => {
-    const saved = readSavedRosters()[month]
+    const migrated = migrateSavedRosters(readSavedRosters())
+    writeSavedRosters(migrated)
+    setSavedMonths(Object.keys(migrated).sort())
+    const saved = migrated[month]
     if (!saved) {
       setResultNotice({
         kind: 'failure',
@@ -1321,8 +1044,11 @@ function App() {
       return
     }
     setStaff(saved.staff)
-    setConditionRows(saved.conditionRows)
-    const restoredForm = saved.structuredForm ?? defaultStructuredForm
+    const restoredForm = {
+      ...defaultStructuredForm,
+      ...(saved.structuredForm ?? {}),
+      excludedAttributes: saved.structuredForm?.excludedAttributes ?? [],
+    }
     const restoredManualAssignments = saved.manualAssignments ?? {}
     const restoredDays = getMonthDays(saved.month)
     const restoredConditions = buildConditionsFromForm(restoredForm, saved.staff, saved.month)
@@ -1359,7 +1085,7 @@ function App() {
 
     setIsSolving(true)
     try {
-      const fixedAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days, parsedConditions)
+      const fixedAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days)
       setSchedule((current) => sanitizeSchedule(current, staff, days, parsedConditions, fixedAssignments))
 
       const response = await fetch('/api/solve', {
@@ -1500,6 +1226,9 @@ function App() {
           <section>
             <h2>自動勤務設定</h2>
             <p className="section-desc">各勤務の平日・土・日・祝の必要人数と区分です。区分は複数設定可でいずれかを満たせばOKです。</p>
+            {structuredForm.shifts.filter((s) => s.code.trim() && s.auto).length === 0 && (
+              <button type="button" className="inline-add" onClick={addShift}><Plus size={15} />追加</button>
+            )}
             {structuredForm.shifts
               .filter((s) => s.code.trim() && s.auto)
               .flatMap((s) => {
@@ -1620,6 +1349,28 @@ function App() {
                 <div className="row-actions">
                   <button type="button" className="row-btn" onClick={() => insertForbiddenRule(index)} title="下に追加"><Plus size={13} /></button>
                   <button type="button" className="row-btn danger" onClick={() => removeForbiddenRule(index)} title="削除"><Trash2 size={13} /></button>
+                </div>
+              </div>
+            ))}
+          </section>
+
+          <section>
+            <h2>除外設定</h2>
+            <p className="section-desc">ここに追加した属性のメンバーは、自動作成時の必要人数カウントに含めません。</p>
+            {(structuredForm.excludedAttributes ?? []).length === 0 && (
+              <button type="button" className="inline-add" onClick={addExcludedAttribute}><Plus size={15} />追加</button>
+            )}
+            {(structuredForm.excludedAttributes ?? []).map((attribute, index) => (
+              <div className="two-col-row" key={`excluded-${index}`}>
+                <select value={attribute} onChange={(event) => updateExcludedAttribute(index, event.target.value)} aria-label="除外属性">
+                  <option value="">-</option>
+                  {structuredForm.attributes.filter((a) => a.name.trim()).map((a) => (
+                    <option key={a.name} value={a.name}>{a.name}</option>
+                  ))}
+                </select>
+                <div className="row-actions">
+                  <button type="button" className="row-btn" onClick={() => insertExcludedAttribute(index)} title="下に追加"><Plus size={13} /></button>
+                  <button type="button" className="row-btn danger" onClick={() => removeExcludedAttribute(index)} title="削除"><Trash2 size={13} /></button>
                 </div>
               </div>
             ))}
