@@ -457,7 +457,8 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     }
   }
 
-  // 固定シフト: 土日祝も含め全勤務日に適用（禁止設定でOFFになる日は除外）
+  // 固定シフト: 土曜・日曜はスキップ（禁止設定で forcedOffDates が設定された平日も除外）
+  // 祝日は includeHolidays フラグで制御
   const fixedWeekdayShifts: Record<string, string> = {}
   const fixedDateShifts: Record<string, Record<number, string>> = {}
   for (const rule of form.fixedRules) {
@@ -469,6 +470,8 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
       fixedDateShifts[person] = {}
       for (const day of getMonthDays(monthValue)) {
         const date = new Date(yr, mo - 1, day)
+        const jsDay = date.getDay()
+        if (jsDay === 0 || jsDay === 6) continue
         const isHoliday = HolidayJp.isHoliday(date)
         if (isHoliday && !rule.includeHolidays) continue
         if (forcedOffDateSet[person]?.has(day)) continue
