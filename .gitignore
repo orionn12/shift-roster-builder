@@ -5,3 +5,5 @@ __pycache__/
 *.pyo
 .venv/
 .env
+backend/out/
+.codex-logs/

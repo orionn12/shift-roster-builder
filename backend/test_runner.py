@@ -15,8 +15,9 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-sys.path.insert(0, str(Path(__file__).parent))
-from app import SolveRequest, solve_roster
+BACKEND_DIR = Path(__file__).parent
+sys.path.insert(0, str(BACKEND_DIR))
+from app import SolveRequest, assess_schedule_quality, parse_month, solve_roster
 
 OFF_CODES = {"OFF", "PAID", "特休"}
 
@@ -248,6 +249,43 @@ def assert_fixed_assignments(request: SolveRequest, schedule) -> list[dict]:
     return results
 
 
+def assert_no_unspecified_manual_codes(request: SolveRequest, schedule) -> list[dict]:
+    """PAID/特休/非auto勤務が、明示指定なしに生成されていないことを確認する"""
+    conditions = request.conditions
+    auto_codes = set(conditions.autoShiftCodes)
+    paid_allowed = {
+        (person, str(day))
+        for person, days in conditions.paidLeaves.items()
+        for day in days
+    }
+    fixed_allowed = {
+        (person, str(day))
+        for person, day_map in request.fixedAssignments.items()
+        for day in day_map
+    }
+    fixed_allowed.update(
+        (person, str(day))
+        for person, day_map in conditions.fixedDateShifts.items()
+        for day in day_map
+    )
+    weekday_fixed_people = set(conditions.fixedWeekdayShifts)
+    violations: list[str] = []
+    for person in request.staff:
+        for day_str, code in schedule.get(person, {}).items():
+            key = (person, day_str)
+            if code == "PAID" and key not in paid_allowed and key not in fixed_allowed:
+                violations.append(f"{person} day {day_str}: unspecified PAID")
+            if code == "特休" and key not in fixed_allowed:
+                violations.append(f"{person} day {day_str}: unspecified 特休")
+            if code not in OFF_CODES and code not in auto_codes and key not in fixed_allowed and person not in weekday_fixed_people:
+                violations.append(f"{person} day {day_str}: unspecified manual shift {code}")
+    return [check(
+        "未指定の有給・特休・常勤なし",
+        not violations,
+        "; ".join(violations[:5]) if violations else "明示指定されたものだけ使用",
+    )]
+
+
 def assert_allowed_shifts(request: SolveRequest, schedule) -> list[dict]:
     """allowedShifts の制限が守られているか確認する。
     各人の自動割り当てシフトは allowedShifts で指定されたコードのみであること。
@@ -419,6 +457,7 @@ def run(fixture_path: str) -> bool:
         results += assert_transition_breaks(request, schedule)
         results += assert_no_non_auto_leakage(request, schedule)
         results += assert_fixed_assignments(request, schedule)
+        results += assert_no_unspecified_manual_codes(request, schedule)
         results += assert_allowed_shifts(request, schedule)
         results += assert_coverage_rules(request, schedule)
         results += assert_forced_off_dates(request, schedule)
@@ -427,9 +466,39 @@ def run(fixture_path: str) -> bool:
     passed = sum(1 for r in results if r["passed"])
     total = len(results)
     failures = [r for r in results if not r["passed"]]
+    auto_shifts = sorted(
+        shift.code
+        for shift in request.conditions.shifts.values()
+        if shift.auto or shift.code in request.conditions.autoShiftCodes
+    )
+    diagnostics = assess_schedule_quality(
+        schedule,
+        request.staff,
+        parse_month(request.month),
+        request.conditions,
+        auto_shifts,
+        request.previousMonthTail,
+    )
+    artifact = {
+        "fixture": fixture_path,
+        "status": response.status,
+        "message": response.message,
+        "passed": passed,
+        "total": total,
+        "failures": failures,
+        "diagnostics": diagnostics,
+        "report": response.report,
+        "schedule": schedule,
+        "request": data,
+    }
+    output_path = BACKEND_DIR / "out" / "latest-run.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"\n{'='*60}")
     print(f"Results: {passed}/{total} passed")
+    print(f"Quality score: {diagnostics['score']}/100")
+    print(f"Agent artifact: {output_path}")
 
     if failures:
         print(f"\nFailed ({len(failures)}):")

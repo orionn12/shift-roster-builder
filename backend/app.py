@@ -72,6 +72,10 @@ class SolveResponse(BaseModel):
     schedule: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
+class ValidateRequest(SolveRequest):
+    schedule: dict[str, dict[str, str]]
+
+
 @dataclass(frozen=True)
 class MonthInfo:
     year: int
@@ -460,17 +464,26 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
                 model.AddAbsEquality(change, x[(person_index, day, shift_code)] - x[(person_index, day + 1, shift_code)])
                 shift_change_vars.append(change)
 
+    balance_total_vars = [
+        total
+        for person, total in zip(staff, total_work_vars, strict=True)
+        if is_workload_balance_eligible(person, conditions)
+    ] or total_work_vars
     max_total = model.NewIntVar(0, len(month_info.days), "max_total")
     min_total = model.NewIntVar(0, len(month_info.days), "min_total")
-    model.AddMaxEquality(max_total, total_work_vars)
-    model.AddMinEquality(min_total, total_work_vars)
+    model.AddMaxEquality(max_total, balance_total_vars)
+    model.AddMinEquality(min_total, balance_total_vars)
 
     for shift_code in auto_shifts:
         shift_totals: list[cp_model.IntVar] = []
         for person_index in range(len(staff)):
+            if not is_shift_balance_eligible(staff[person_index], shift_code, conditions):
+                continue
             total = model.NewIntVar(0, len(month_info.days), f"total_{person_index}_{shift_code}")
             model.Add(total == sum(x[(person_index, day, shift_code)] for day in month_info.days))
             shift_totals.append(total)
+        if len(shift_totals) < 2:
+            continue
         shift_max = model.NewIntVar(0, len(month_info.days), f"max_{shift_code}")
         shift_min = model.NewIntVar(0, len(month_info.days), f"min_{shift_code}")
         model.AddMaxEquality(shift_max, shift_totals)
@@ -479,11 +492,11 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
         model.Add(diff == shift_max - shift_min)
         shift_range_vars.append(diff)
 
-    transition_weight = 4 if conditions.preferConsecutiveHolidays else 0
-    shift_change_weight = 2 if conditions.preferSameShiftStreaks else 0
+    transition_weight = 2 if conditions.preferConsecutiveHolidays else 0
+    shift_change_weight = 1 if conditions.preferSameShiftStreaks else 0
     model.Minimize(
         (max_total - min_total) * 100
-        + sum(shift_range_vars) * 10
+        + sum(shift_range_vars) * 80
         + sum(transition_vars) * transition_weight
         + sum(shift_change_vars) * shift_change_weight
     )
@@ -491,6 +504,7 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 15
     solver.parameters.num_search_workers = 8
+    solver.parameters.random_seed = 1
     status = solver.Solve(model)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -532,9 +546,32 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
             auto_shifts,
             status == cp_model.OPTIMAL,
             previous_tail,
+            conditions,
         ),
         schedule=schedule,
     )
+
+
+@app.post("/api/validate")
+def validate_roster(request: ValidateRequest) -> dict[str, Any]:
+    month_info = parse_month(request.month)
+    auto_shifts = sorted(
+        shift.code
+        for shift in request.conditions.shifts.values()
+        if shift.auto or shift.code in request.conditions.autoShiftCodes
+    )
+    diagnostics = assess_schedule_quality(
+        request.schedule,
+        request.staff,
+        month_info,
+        request.conditions,
+        auto_shifts,
+        request.previousMonthTail,
+    )
+    return {
+        "status": "valid" if not diagnostics["hardViolations"] else "needs_review",
+        "diagnostics": diagnostics,
+    }
 
 
 def parse_month(month_value: str) -> MonthInfo:
@@ -571,6 +608,25 @@ def needed_staff_count(
             conditions.weekendNeed.get(shift_code, conditions.dailyNeed.get(shift_code, 0)),
         )
     return conditions.weekdayNeed.get(shift_code, conditions.dailyNeed.get(shift_code, 0))
+
+
+def is_shift_balance_eligible(person: str, shift_code: str, conditions: Conditions) -> bool:
+    if shift_code in set(conditions.forbiddenAlwaysShifts.get(person, [])):
+        return False
+    allowed = conditions.allowedShifts.get(person)
+    if allowed is not None and shift_code not in set(allowed):
+        return False
+    fixed_weekday = conditions.fixedWeekdayShifts.get(person)
+    if fixed_weekday:
+        return False
+    fixed_dates = set(conditions.fixedDateShifts.get(person, {}).values())
+    if fixed_dates and fixed_dates != {shift_code}:
+        return False
+    return True
+
+
+def is_workload_balance_eligible(person: str, conditions: Conditions) -> bool:
+    return not conditions.fixedWeekdayShifts.get(person)
 
 
 def failure_report(summary: str) -> dict[str, Any]:
@@ -639,6 +695,7 @@ def build_success_report(
     auto_shifts: list[str],
     is_optimal: bool,
     previous_tail: dict[str, PreviousTail],
+    conditions: Conditions,
 ) -> dict[str, Any]:
     work_counts: dict[str, int] = {}
     shift_counts: dict[str, dict[str, int]] = {}
@@ -683,11 +740,21 @@ def build_success_report(
     if inherited_count:
         warnings.append(f"前月末の勤務情報を{inherited_count}人分参照しました。")
 
+    diagnostics = assess_schedule_quality(
+        schedule,
+        list(schedule.keys()),
+        month_info,
+        conditions,
+        auto_shifts,
+        previous_tail,
+    )
+    warnings.extend(diagnostics["warnings"])
+
     return {
         "title": "作成できました",
         "summary": "必要人数、有給、最大連勤などの条件を満たす勤務表を作成しました。",
         "warnings": warnings,
-        "suggestions": [] if is_optimal else ["最適解ではなく実行可能解です。条件を少し緩めるとより公平な表になる可能性があります。"],
+        "suggestions": diagnostics["suggestions"] if diagnostics["suggestions"] else ([] if is_optimal else ["最適解ではなく実行可能解です。条件を少し緩めるとより公平な表になる可能性があります。"]),
         "stats": {
             "solverStatus": "optimal" if is_optimal else "feasible",
             "staffCount": len(schedule),
@@ -695,5 +762,213 @@ def build_success_report(
             "paidCount": paid_count,
             "minWorkDays": min_work,
             "maxWorkDays": max_work,
+            "qualityScore": diagnostics["score"],
+            "hardViolationCount": len(diagnostics["hardViolations"]),
+            "softIssueCount": len(diagnostics["softIssues"]),
+        },
+        "quality": diagnostics,
+        "agentContext": {
+            "purpose": "Machine-readable roster diagnostics for iterative solver tuning.",
+            "month": f"{month_info.year}-{month_info.month:02d}",
+            "autoShifts": auto_shifts,
+            "workloadByPerson": work_counts,
+            "shiftCountsByPerson": shift_counts,
+            "nextActions": diagnostics["suggestions"],
+        },
+    }
+
+
+def assess_schedule_quality(
+    schedule: dict[str, dict[str, str]],
+    staff: list[str],
+    month_info: MonthInfo,
+    conditions: Conditions,
+    auto_shifts: list[str],
+    previous_tail: dict[str, PreviousTail] | None = None,
+) -> dict[str, Any]:
+    off_codes = {"OFF", "PAID", "特休", "迚ｹ莨・"}
+    previous_tail = previous_tail or {}
+    hard_violations: list[dict[str, Any]] = []
+    soft_issues: list[dict[str, Any]] = []
+    suggestions: list[str] = []
+    warnings: list[str] = []
+    day_summaries: dict[str, Any] = {}
+
+    def code_for(person: str, day: int) -> str:
+        return schedule.get(person, {}).get(str(day), "OFF")
+
+    def is_work(code: str) -> bool:
+        return code not in off_codes
+
+    for person in staff:
+        assignments = schedule.get(person, {})
+        missing = [day for day in month_info.days if str(day) not in assignments]
+        if missing:
+            hard_violations.append({
+                "type": "missing_assignment",
+                "person": person,
+                "days": missing,
+                "message": f"{person} has missing assignments: {missing[:5]}",
+            })
+
+    holiday_set = set(conditions.holidayDates)
+    for day in month_info.days:
+        weekday = calendar.weekday(month_info.year, month_info.month, day)
+        is_holiday = day in holiday_set
+        shift_counts = {
+            shift: sum(1 for person in staff if code_for(person, day) == shift)
+            for shift in auto_shifts
+        }
+        needed = {
+            shift: conditions.dateNeed.get(day, {}).get(
+                shift,
+                needed_staff_count(month_info, day, shift, conditions, weekday, is_holiday),
+            )
+            for shift in auto_shifts
+        }
+        shortfalls = {
+            shift: {"actual": shift_counts[shift], "needed": need}
+            for shift, need in needed.items()
+            if shift_counts[shift] < need
+        }
+        if shortfalls:
+            hard_violations.append({
+                "type": "staffing_shortfall",
+                "day": day,
+                "shortfalls": shortfalls,
+                "message": f"day {day} staffing shortfall: {shortfalls}",
+            })
+        day_summaries[str(day)] = {
+            "weekday": weekday,
+            "isHoliday": is_holiday,
+            "shiftCounts": shift_counts,
+            "needed": needed,
+            "workingTotal": sum(1 for person in staff if is_work(code_for(person, day))),
+        }
+
+    work_counts: dict[str, int] = {}
+    shift_counts_by_person: dict[str, dict[str, int]] = {}
+    max_consecutive_by_person: dict[str, int] = {}
+    isolated_off_by_person: dict[str, list[list[int]]] = {}
+    for person in staff:
+        work_counts[person] = 0
+        shift_counts_by_person[person] = {shift: 0 for shift in auto_shifts}
+        current_run = min(
+            conditions.maxConsecutive,
+            max(0, previous_tail.get(person, PreviousTail()).consecutiveWorkDays),
+        )
+        max_run = current_run
+        off_run: list[int] = []
+        isolated_runs: list[list[int]] = []
+
+        for day in month_info.days:
+            code = code_for(person, day)
+            if is_work(code):
+                work_counts[person] += 1
+                if code in shift_counts_by_person[person]:
+                    shift_counts_by_person[person][code] += 1
+                current_run += 1
+                if 0 < len(off_run) < conditions.minConsecutiveHolidays:
+                    isolated_runs.append(off_run)
+                off_run = []
+            else:
+                current_run = 0
+                off_run.append(day)
+            max_run = max(max_run, current_run)
+
+        if 0 < len(off_run) < conditions.minConsecutiveHolidays:
+            isolated_runs.append(off_run)
+        max_consecutive_by_person[person] = max_run
+        isolated_off_by_person[person] = isolated_runs
+        if max_run > conditions.maxConsecutive:
+            hard_violations.append({
+                "type": "max_consecutive_exceeded",
+                "person": person,
+                "maxRun": max_run,
+                "limit": conditions.maxConsecutive,
+                "message": f"{person} exceeds max consecutive days: {max_run}>{conditions.maxConsecutive}",
+            })
+        if isolated_runs:
+            hard_violations.append({
+                "type": "isolated_holiday",
+                "person": person,
+                "runs": isolated_runs,
+                "limit": conditions.minConsecutiveHolidays,
+                "message": f"{person} has holiday runs shorter than {conditions.minConsecutiveHolidays}: {isolated_runs[:3]}",
+            })
+
+    balanced_work_counts = {
+        person: count
+        for person, count in work_counts.items()
+        if is_workload_balance_eligible(person, conditions)
+    } or work_counts
+    min_work = min(balanced_work_counts.values()) if balanced_work_counts else 0
+    max_work = max(balanced_work_counts.values()) if balanced_work_counts else 0
+    workload_range = max_work - min_work
+    if workload_range >= 4:
+        soft_issues.append({
+            "type": "workload_imbalance",
+            "range": workload_range,
+            "min": min_work,
+            "max": max_work,
+            "heaviest": [p for p, c in balanced_work_counts.items() if c == max_work],
+            "lightest": [p for p, c in balanced_work_counts.items() if c == min_work],
+        })
+        suggestions.append("勤務日数の差が大きいため、targetWorkDaysByPerson で常勤・固定勤務者と交替勤務者の目標日数を分けてください。")
+
+    shift_ranges: dict[str, dict[str, Any]] = {}
+    for shift in auto_shifts:
+        counts = {
+            person: sum(
+                1
+                for day in month_info.days
+                if code_for(person, day) == shift
+                and conditions.fixedDateShifts.get(person, {}).get(str(day)) != shift
+                and conditions.fixedDateShifts.get(person, {}).get(day) != shift
+            )
+            for person in shift_counts_by_person
+            if is_shift_balance_eligible(person, shift, conditions)
+        }
+        if not counts:
+            continue
+        min_shift = min(counts.values())
+        max_shift = max(counts.values())
+        shift_ranges[shift] = {
+            "min": min_shift,
+            "max": max_shift,
+            "range": max_shift - min_shift,
+            "heaviest": [p for p, c in counts.items() if c == max_shift],
+            "lightest": [p for p, c in counts.items() if c == min_shift],
+        }
+        if max_shift - min_shift >= 4:
+            soft_issues.append({"type": "shift_imbalance", "shift": shift, **shift_ranges[shift]})
+            suggestions.append(f"{shift}勤務の偏りが大きいため、{shift}の個人別回数差を目的関数でさらに重くしてください。")
+
+    score = 100
+    score -= 25 * len(hard_violations)
+    score -= min(30, workload_range * 3)
+    score -= min(20, sum(item["range"] for item in shift_ranges.values()))
+    score = max(0, score)
+
+    if not hard_violations and not soft_issues:
+        warnings.append("機械診断では大きな問題は見つかりませんでした。")
+    else:
+        warnings.append(f"品質スコア {score}/100、重大違反 {len(hard_violations)} 件、改善候補 {len(soft_issues)} 件です。")
+
+    return {
+        "score": score,
+        "hardViolations": hard_violations,
+        "softIssues": soft_issues,
+        "warnings": warnings,
+        "suggestions": list(dict.fromkeys(suggestions)),
+        "metrics": {
+            "workCounts": work_counts,
+            "balancedWorkCounts": balanced_work_counts,
+            "workloadRange": workload_range,
+            "shiftCountsByPerson": shift_counts_by_person,
+            "shiftRanges": shift_ranges,
+            "maxConsecutiveByPerson": max_consecutive_by_person,
+            "isolatedOffByPerson": isolated_off_by_person,
+            "daySummaries": day_summaries,
         },
     }

@@ -17,6 +17,7 @@ import './App.css'
 
 type ShiftCode = string
 type Schedule = Record<string, Record<number, ShiftCode>>
+type ManualAssignments = Record<string, Record<number, ShiftCode>>
 
 type ShiftDefinition = {
   code: string
@@ -145,6 +146,7 @@ type SavedRoster = {
   conditionRows: string[]
   structuredForm?: StructuredForm
   schedule: Schedule
+  manualAssignments?: ManualAssignments
   report: SolveReport | null
   message: string
   savedAt: string
@@ -192,8 +194,6 @@ const defaultConditions = [
   '最大連勤5日',
   '小里 松本 田上 のうち必ず1人',
   '高田 高橋 は常に同一勤務',
-  '小伏は10日と19日有給',
-  '川田は8日有給',
 ]
 
 const defaultStructuredForm: StructuredForm = {
@@ -804,6 +804,80 @@ function mergeScheduleShape(current: Schedule, staff: string[], days: number[]):
   return next
 }
 
+function pruneManualAssignments(current: ManualAssignments, staff: string[], days: number[]): ManualAssignments {
+  const daySet = new Set(days)
+  const next: ManualAssignments = {}
+  for (const person of staff) {
+    const entries = Object.entries(current[person] ?? {})
+      .map(([day, code]) => [Number(day), code] as const)
+      .filter(([day]) => daySet.has(day))
+    if (entries.length > 0) {
+      next[person] = Object.fromEntries(entries)
+    }
+  }
+  return next
+}
+
+function sanitizeSchedule(
+  current: Schedule,
+  staff: string[],
+  days: number[],
+  conditions: ParsedConditions,
+  manualAssignments: ManualAssignments = {},
+): Schedule {
+  const next = mergeScheduleShape(current, staff, days)
+  const autoCodes = new Set(conditions.autoShiftCodes)
+  for (const person of staff) {
+    const paidDays = new Set(conditions.paidLeaves[person] ?? [])
+    const fixedDates = conditions.fixedDateShifts[person] ?? {}
+    const fixedWeekdayShift = conditions.fixedWeekdayShifts[person]
+    for (const day of days) {
+      const code = next[person]?.[day] ?? 'OFF'
+      const manualCode = manualAssignments[person]?.[day]
+      if (code === 'PAID' && !paidDays.has(day) && fixedDates[day] !== 'PAID') {
+        next[person][day] = 'OFF'
+        continue
+      }
+      if (code === '特休' && manualCode !== '特休' && fixedDates[day] !== '特休') {
+        next[person][day] = 'OFF'
+        continue
+      }
+      if (
+        code !== 'OFF' &&
+        code !== 'PAID' &&
+        code !== '特休' &&
+        !autoCodes.has(code) &&
+        manualCode !== code &&
+        fixedDates[day] !== code &&
+        fixedWeekdayShift !== code
+      ) {
+        next[person][day] = 'OFF'
+      }
+    }
+  }
+  return next
+}
+
+function buildFixedAssignmentsForSolve(
+  current: ManualAssignments,
+  staff: string[],
+  days: number[],
+  conditions: ParsedConditions,
+): ManualAssignments {
+  const pruned = pruneManualAssignments(current, staff, days)
+  const next: ManualAssignments = {}
+  for (const person of staff) {
+    const paidDays = new Set(conditions.paidLeaves[person] ?? [])
+    for (const [dayText, code] of Object.entries(pruned[person] ?? {})) {
+      const day = Number(dayText)
+      if (code === 'PAID' && !paidDays.has(day)) continue
+      if (!next[person]) next[person] = {}
+      next[person][day] = code
+    }
+  }
+  return next
+}
+
 function readSavedRosters(): Record<string, SavedRoster> {
   const raw = localStorage.getItem(savedRostersKey)
   if (!raw) return {}
@@ -879,11 +953,22 @@ function App() {
   const [schedule, setSchedule] = useState<Schedule>(() =>
     blankSchedule(defaultStaff, getMonthDays('2026-06')),
   )
+  const [manualAssignments, setManualAssignments] = useState<ManualAssignments>({})
 
   const days = useMemo(() => getMonthDays(month), [month])
+  const hasPaidLeaveSetting = Object.values(parsedConditions.paidLeaves).some((leaveDays) => leaveDays.length > 0)
   const allShiftOptions = useMemo(
-    () => ['OFF', 'PAID', '特休', ...structuredForm.shifts.filter((s) => s.code.trim()).map((s) => s.code.trim().toUpperCase()).sort()],
-    [structuredForm.shifts],
+    () => [
+      'OFF',
+      ...(hasPaidLeaveSetting ? ['PAID'] : []),
+      '特休',
+      ...structuredForm.shifts.filter((s) => s.code.trim()).map((s) => s.code.trim().toUpperCase()).sort(),
+    ],
+    [hasPaidLeaveSetting, structuredForm.shifts],
+  )
+  const visibleSchedule = useMemo(
+    () => sanitizeSchedule(schedule, staff, days, parsedConditions, manualAssignments),
+    [days, manualAssignments, parsedConditions, schedule, staff],
   )
   const zoneOptions = useMemo(
     () => structuredForm.coverageRules.map((_, i) => ({
@@ -1086,6 +1171,7 @@ function App() {
     const nextStaff = [...staff, name]
     setStaff(nextStaff)
     setSchedule((current) => mergeScheduleShape(current, nextStaff, days))
+    setManualAssignments((current) => pruneManualAssignments(current, nextStaff, days))
     setNewStaff('')
   }
 
@@ -1093,6 +1179,7 @@ function App() {
     const nextStaff = staff.filter((item) => item !== person)
     setStaff(nextStaff)
     setSchedule((current) => mergeScheduleShape(current, nextStaff, days))
+    setManualAssignments((current) => pruneManualAssignments(current, nextStaff, days))
   }
 
   const moveStaff = (index: number, direction: -1 | 1) => {
@@ -1196,16 +1283,20 @@ function App() {
     const nextDays = getMonthDays(value)
     setMonth(value)
     setSchedule((current) => mergeScheduleShape(current, staff, nextDays))
+    setManualAssignments((current) => pruneManualAssignments(current, staff, nextDays))
   }
 
   const saveCurrentRoster = () => {
     const saved = readSavedRosters()
+    const cleanManualAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days, parsedConditions)
+    const cleanSchedule = sanitizeSchedule(visibleSchedule, staff, days, parsedConditions, cleanManualAssignments)
     saved[month] = {
       month,
       staff,
       conditionRows,
       structuredForm,
-      schedule,
+      schedule: cleanSchedule,
+      manualAssignments: cleanManualAssignments,
       report: lastReport,
       message: lastSolveMessage,
       savedAt: new Date().toISOString(),
@@ -1231,8 +1322,13 @@ function App() {
     }
     setStaff(saved.staff)
     setConditionRows(saved.conditionRows)
-    setStructuredForm(saved.structuredForm ?? defaultStructuredForm)
-    setSchedule(saved.schedule)
+    const restoredForm = saved.structuredForm ?? defaultStructuredForm
+    const restoredManualAssignments = saved.manualAssignments ?? {}
+    const restoredDays = getMonthDays(saved.month)
+    const restoredConditions = buildConditionsFromForm(restoredForm, saved.staff, saved.month)
+    setStructuredForm(restoredForm)
+    setManualAssignments(pruneManualAssignments(restoredManualAssignments, saved.staff, restoredDays))
+    setSchedule(sanitizeSchedule(saved.schedule, saved.staff, restoredDays, restoredConditions, restoredManualAssignments))
     setLastReport(saved.report)
     setLastSolveMessage(saved.message)
     setResultNotice({
@@ -1263,26 +1359,8 @@ function App() {
 
     setIsSolving(true)
     try {
-      // 現在のスケジュールから PAID・特休・非autoシフト（手動入力）を fixedAssignments として収集
-      const fixedAssignments: Record<string, Record<number, string>> = {}
-      for (const person of staff) {
-        for (const day of days) {
-          const code = schedule[person]?.[day]
-          if (!code || code === 'OFF') continue
-          // PAID・特休は常に固定
-          if (code === 'PAID' || code === '特休') {
-            if (!fixedAssignments[person]) fixedAssignments[person] = {}
-            fixedAssignments[person][day] = code
-            continue
-          }
-          // 非autoシフトも手動入力として固定
-          const isAutoShift = parsedConditions.autoShiftCodes.includes(code)
-          if (!isAutoShift) {
-            if (!fixedAssignments[person]) fixedAssignments[person] = {}
-            fixedAssignments[person][day] = code
-          }
-        }
-      }
+      const fixedAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days, parsedConditions)
+      setSchedule((current) => sanitizeSchedule(current, staff, days, parsedConditions, fixedAssignments))
 
       const response = await fetch('/api/solve', {
         method: 'POST',
@@ -1352,10 +1430,10 @@ function App() {
       ['担当', ...days.map((day) => `${day}(${weekdayLabel(month, day)})`), '勤務日数'].join(','),
       ...staff.map((person) => {
         const workDays = days.filter((day) => {
-          const code = schedule[person]?.[day]
+          const code = visibleSchedule[person]?.[day]
           return code && code !== 'OFF' && code !== 'PAID' && code !== '特休'
         }).length
-        return [person, ...days.map((day) => schedule[person][day]), workDays].join(',')
+        return [person, ...days.map((day) => visibleSchedule[person][day]), workDays].join(',')
       }),
     ]
     const blob = new Blob([`﻿${rows.join('\n')}`], { type: 'text/csv;charset=utf-8' })
@@ -1396,7 +1474,10 @@ function App() {
               <Sparkles size={18} />
               {isSolving ? '作成中' : '自動作成'}
             </button>
-            <button type="button" className="reset-button compact-reset" onClick={() => setSchedule(blankSchedule(staff, days))}>
+            <button type="button" className="reset-button compact-reset" onClick={() => {
+              setSchedule(blankSchedule(staff, days))
+              setManualAssignments({})
+            }}>
               <RotateCcw size={18} />
               初期化
             </button>
@@ -1724,28 +1805,36 @@ function App() {
               <tbody>
                 {staff.map((person) => {
                   const workDays = days.filter((day) => {
-                    const code = schedule[person]?.[day]
+                    const code = visibleSchedule[person]?.[day]
                     return code && code !== 'OFF' && code !== 'PAID' && code !== '特休'
                   }).length
                   return (
                     <tr key={person}>
                       <th className="sticky-name">{person}</th>
                       {days.map((day) => {
-                        const value = schedule[person]?.[day] ?? 'OFF'
+                        const value = visibleSchedule[person]?.[day] ?? 'OFF'
                         return (
                           <td key={day} className={`${getShiftClass(value)} ${isDayOff(month, day) ? 'weekend' : ''}`}>
                             <select
                               value={value}
                               aria-label={`${person} ${day}日`}
-                              onChange={(event) =>
+                              onChange={(event) => {
+                                const nextValue = event.target.value
                                 setSchedule((current) => ({
                                   ...current,
                                   [person]: {
                                     ...current[person],
-                                    [day]: event.target.value,
+                                    [day]: nextValue,
                                   },
                                 }))
-                              }
+                                setManualAssignments((current) => ({
+                                  ...current,
+                                  [person]: {
+                                    ...(current[person] ?? {}),
+                                    [day]: nextValue,
+                                  },
+                                }))
+                              }}
                             >
                               {allShiftOptions.map((code) => (
                                 <option key={code} value={code}>
