@@ -28,7 +28,6 @@ class Conditions(BaseModel):
     minConsecutiveHolidays: int = 0
     mustOneGroups: list[list[str]] = Field(default_factory=list)
     sameShiftGroups: list[list[str]] = Field(default_factory=list)
-    paidLeaves: dict[str, list[int]] = Field(default_factory=dict)
     targetWorkDays: int | None = None
     targetWorkDaysByPerson: dict[str, int] = Field(default_factory=dict)
     fixedWeekdayShifts: dict[str, str] = Field(default_factory=dict)
@@ -152,7 +151,6 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
                 )
 
     for person_index, person in enumerate(staff):
-        paid_days = set(conditions.paidLeaves.get(person, []))
         # 非autoシフトはその人の fixedDateShifts / fixedWeekdayShifts にあるものだけ許可
         person_allowed_non_auto = set()
         for v in conditions.fixedDateShifts.get(person, {}).values():
@@ -182,11 +180,6 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
 
             # fixedAssignments: PAID/特休/手動シフト → ソルバーは触らない (OFF扱い)
             if day in person_fixed_assignments:
-                model.Add(sum(work_vars) == 0)
-                continue
-
-            # PAID days → OFF (no auto shift)
-            if day in paid_days:
                 model.Add(sum(work_vars) == 0)
                 continue
 
@@ -522,7 +515,6 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
 
     schedule: dict[str, dict[str, str]] = {}
     for person_index, person in enumerate(staff):
-        paid_days = set(conditions.paidLeaves.get(person, []))
         fixed_date_shifts = {int(k): v for k, v in conditions.fixedDateShifts.get(person, {}).items()}
         person_fixed_assignments = {int(k): v for k, v in request.fixedAssignments.get(person, {}).items()}
         schedule[person] = {}
@@ -530,8 +522,6 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
             if day in person_fixed_assignments:
                 # fixedAssignments は絶対厳守（PAID・特休・手動シフト）
                 assigned = person_fixed_assignments[day]
-            elif day in paid_days:
-                assigned = "PAID"
             elif day in fixed_date_shifts and fixed_date_shifts[day] not in auto_shifts:
                 # Fixed shift not in solver domain: assign directly
                 assigned = fixed_date_shifts[day]
@@ -658,8 +648,7 @@ def build_infeasible_report(
         unavailable = {
             person
             for person in staff
-            if day in set(conditions.paidLeaves.get(person, []))
-            or day in set(conditions.forcedOffDates.get(person, []))
+            if day in set(conditions.forcedOffDates.get(person, []))
         }
         available_count = len(staff) - len(unavailable)
         weekday = calendar.weekday(month_info.year, month_info.month, day)

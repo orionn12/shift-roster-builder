@@ -48,7 +48,6 @@ type ParsedConditions = {
   minConsecutiveHolidays: number
   mustOneGroups: string[][]
   sameShiftGroups: string[][]
-  paidLeaves: Record<string, number[]>
   targetWorkDays?: number
   targetWorkDaysByPerson: Record<string, number>
   fixedWeekdayShifts: Record<string, string>
@@ -137,15 +136,11 @@ type SolveReport = {
 }
 
 type SavedRoster = {
-  schemaVersion?: number
   month: string
   staff: string[]
-  structuredForm?: StructuredForm
+  structuredForm: StructuredForm
   schedule: Schedule
-  manualAssignments?: ManualAssignments
-  report: SolveReport | null
-  message: string
-  savedAt: string
+  manualAssignments: ManualAssignments
 }
 
 type PreviousTail = Record<string, { lastShift: string; consecutiveWorkDays: number }>
@@ -289,8 +284,6 @@ const weekdayNameToIndex: Record<string, number> = {
 
 
 function buildConditionsFromForm(form: StructuredForm, staff: string[], monthValue: string): ParsedConditions {
-  const paidLeaves: Record<string, number[]> = {}
-
   const targetWorkDaysByPerson: Record<string, number> = {}
 
   // 禁止設定を先に処理し forcedOffDates を確定させる（固定シフトの除外日に使用）
@@ -426,7 +419,6 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     minConsecutiveHolidays: form.minConsecutiveHolidays ?? 0,
     mustOneGroups: [],
     sameShiftGroups: [],
-    paidLeaves,
     targetWorkDays: undefined,
     targetWorkDaysByPerson,
     fixedWeekdayShifts,
@@ -555,11 +547,60 @@ function buildFixedAssignmentsForSolve(
   return next
 }
 
+function compactStructuredForm(value: unknown): StructuredForm {
+  const form = (value && typeof value === 'object' ? value : {}) as Partial<StructuredForm>
+  return {
+    ...defaultStructuredForm,
+    shifts: form.shifts ?? [],
+    staffing: form.staffing ?? {},
+    maxConsecutive: form.maxConsecutive ?? defaultStructuredForm.maxConsecutive,
+    minConsecutiveHolidays: form.minConsecutiveHolidays ?? defaultStructuredForm.minConsecutiveHolidays,
+    preferSameShiftStreaks: form.preferSameShiftStreaks ?? defaultStructuredForm.preferSameShiftStreaks,
+    preferConsecutiveHolidays: form.preferConsecutiveHolidays ?? defaultStructuredForm.preferConsecutiveHolidays,
+    fixedRules: form.fixedRules ?? [],
+    allowedRules: form.allowedRules ?? [],
+    attributes: form.attributes ?? [],
+    staffAttributes: form.staffAttributes ?? {},
+    excludedAttributes: form.excludedAttributes ?? [],
+    coverageRules: form.coverageRules ?? [],
+    forbiddenRules: form.forbiddenRules ?? [],
+    specialNeeds: form.specialNeeds ?? [],
+  }
+}
+
+function compactSavedRoster(month: string, value: unknown): SavedRoster | null {
+  if (!value || typeof value !== 'object') return null
+  const roster = value as Partial<SavedRoster>
+  if (!Array.isArray(roster.staff) || !roster.schedule) return null
+
+  const structuredForm = compactStructuredForm(roster.structuredForm)
+  const days = getMonthDays(month)
+  const manualAssignments = buildFixedAssignmentsForSolve(roster.manualAssignments ?? {}, roster.staff, days)
+  const conditions = buildConditionsFromForm(structuredForm, roster.staff, month)
+
+  return {
+    month,
+    staff: roster.staff,
+    structuredForm,
+    schedule: sanitizeSchedule(roster.schedule, roster.staff, days, conditions, manualAssignments),
+    manualAssignments,
+  }
+}
+
+function compactSavedRosters(saved: Record<string, unknown>): Record<string, SavedRoster> {
+  return Object.fromEntries(
+    Object.entries(saved).flatMap(([month, roster]) => {
+      const compact = compactSavedRoster(month, roster)
+      return compact ? [[month, compact]] : []
+    }),
+  )
+}
+
 function readSavedRosters(): Record<string, SavedRoster> {
   const raw = localStorage.getItem(savedRostersKey)
   if (!raw) return {}
   try {
-    return JSON.parse(raw) as Record<string, SavedRoster>
+    return compactSavedRosters(JSON.parse(raw) as Record<string, unknown>)
   } catch {
     return {}
   }
@@ -569,43 +610,8 @@ function writeSavedRosters(saved: Record<string, SavedRoster>) {
   localStorage.setItem(savedRostersKey, JSON.stringify(saved))
 }
 
-function migrateSavedRosters(saved: Record<string, SavedRoster>): Record<string, SavedRoster> {
-  return Object.fromEntries(
-    Object.entries(saved).map(([key, roster]) => {
-      const { conditionRows: _conditionRows, ...cleanRoster } = roster as SavedRoster & { conditionRows?: unknown }
-      const structuredForm = cleanRoster.structuredForm
-        ? (() => {
-            const { paidLeaves: _paidLeaves, ...rest } = cleanRoster.structuredForm as StructuredForm & { paidLeaves?: unknown }
-            return rest
-          })()
-        : undefined
-      if (cleanRoster.schemaVersion === 2) return [key, { ...cleanRoster, structuredForm }]
-      const stripAssignments = (assignments: Record<string, Record<number, string>> | undefined) =>
-        Object.fromEntries(
-          Object.entries(assignments ?? {}).flatMap(([person, dayMap]) => {
-            const kept = Object.fromEntries(
-              Object.entries(dayMap).filter(([, code]) => code !== 'PAID'),
-            )
-            return Object.keys(kept).length > 0 ? [[person, kept]] : []
-          }),
-        )
-      const conditions = buildConditionsFromForm(structuredForm ?? defaultStructuredForm, cleanRoster.staff, cleanRoster.month)
-      return [
-        key,
-        {
-          ...cleanRoster,
-          schemaVersion: 2,
-          structuredForm,
-          manualAssignments: stripAssignments(cleanRoster.manualAssignments),
-          schedule: sanitizeSchedule(cleanRoster.schedule, cleanRoster.staff, getMonthDays(cleanRoster.month), conditions, {}),
-        },
-      ]
-    }),
-  )
-}
-
 function buildPreviousTail(monthValue: string, staff: string[], maxConsecutive: number): PreviousTail {
-  const previous = migrateSavedRosters(readSavedRosters())[previousMonthValue(monthValue)]
+  const previous = readSavedRosters()[previousMonthValue(monthValue)]
   if (!previous) return {}
   const previousDays = getMonthDays(previous.month)
   const tail: PreviousTail = {}
@@ -657,9 +663,9 @@ function App() {
   const [isReportOpen, setIsReportOpen] = useState(false)
   const [resultNotice, setResultNotice] = useState<ResultNotice | null>(null)
   const [savedMonths, setSavedMonths] = useState(() => {
-    const migrated = migrateSavedRosters(readSavedRosters())
-    writeSavedRosters(migrated)
-    return Object.keys(migrated).sort()
+    const saved = readSavedRosters()
+    writeSavedRosters(saved)
+    return Object.keys(saved).sort()
   })
   const parsedConditions = useMemo(
     () => buildConditionsFromForm(structuredForm, staff, month),
@@ -1011,15 +1017,11 @@ function App() {
     const cleanManualAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days)
     const cleanSchedule = sanitizeSchedule(visibleSchedule, staff, days, parsedConditions, cleanManualAssignments)
     saved[month] = {
-      schemaVersion: 2,
       month,
       staff,
       structuredForm,
       schedule: cleanSchedule,
       manualAssignments: cleanManualAssignments,
-      report: lastReport,
-      message: lastSolveMessage,
-      savedAt: new Date().toISOString(),
     }
     writeSavedRosters(saved)
     setSavedMonths(Object.keys(saved).sort())
@@ -1031,10 +1033,10 @@ function App() {
   }
 
   const loadCurrentRoster = () => {
-    const migrated = migrateSavedRosters(readSavedRosters())
-    writeSavedRosters(migrated)
-    setSavedMonths(Object.keys(migrated).sort())
-    const saved = migrated[month]
+    const savedRosters = readSavedRosters()
+    writeSavedRosters(savedRosters)
+    setSavedMonths(Object.keys(savedRosters).sort())
+    const saved = savedRosters[month]
     if (!saved) {
       setResultNotice({
         kind: 'failure',
@@ -1046,17 +1048,17 @@ function App() {
     setStaff(saved.staff)
     const restoredForm = {
       ...defaultStructuredForm,
-      ...(saved.structuredForm ?? {}),
-      excludedAttributes: saved.structuredForm?.excludedAttributes ?? [],
+      ...saved.structuredForm,
+      excludedAttributes: saved.structuredForm.excludedAttributes ?? [],
     }
-    const restoredManualAssignments = saved.manualAssignments ?? {}
+    const restoredManualAssignments = saved.manualAssignments
     const restoredDays = getMonthDays(saved.month)
     const restoredConditions = buildConditionsFromForm(restoredForm, saved.staff, saved.month)
     setStructuredForm(restoredForm)
     setManualAssignments(pruneManualAssignments(restoredManualAssignments, saved.staff, restoredDays))
     setSchedule(sanitizeSchedule(saved.schedule, saved.staff, restoredDays, restoredConditions, restoredManualAssignments))
-    setLastReport(saved.report)
-    setLastSolveMessage(saved.message)
+    setLastReport(null)
+    setLastSolveMessage('')
     setResultNotice({
       kind: 'success',
       title: '呼び出しました',

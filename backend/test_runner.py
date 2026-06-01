@@ -258,11 +258,6 @@ def assert_no_unspecified_manual_codes(request: SolveRequest, schedule) -> list[
     """PAID/特休/非auto勤務が、明示指定なしに生成されていないことを確認する"""
     conditions = request.conditions
     auto_codes = set(conditions.autoShiftCodes)
-    paid_allowed = {
-        (person, str(day))
-        for person, days in conditions.paidLeaves.items()
-        for day in days
-    }
     fixed_allowed = {
         (person, str(day))
         for person, day_map in request.fixedAssignments.items()
@@ -278,7 +273,7 @@ def assert_no_unspecified_manual_codes(request: SolveRequest, schedule) -> list[
     for person in request.staff:
         for day_str, code in schedule.get(person, {}).items():
             key = (person, day_str)
-            if code == "PAID" and key not in paid_allowed and key not in fixed_allowed:
+            if code == "PAID" and key not in fixed_allowed:
                 violations.append(f"{person} day {day_str}: unspecified PAID")
             if code == "特休" and key not in fixed_allowed:
                 violations.append(f"{person} day {day_str}: unspecified 特休")
