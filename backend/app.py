@@ -492,7 +492,7 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
         shift_range_vars.append(diff)
 
     transition_weight = 2 if conditions.preferConsecutiveHolidays else 0
-    shift_change_weight = 1 if conditions.preferSameShiftStreaks else 0
+    shift_change_weight = 60 if conditions.preferSameShiftStreaks else 0
     model.Minimize(
         (max_total - min_total) * 100
         + sum(shift_range_vars) * 80
