@@ -213,7 +213,8 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
 
         person_target_work_days = conditions.targetWorkDaysByPerson.get(person, conditions.targetWorkDays)
         if person_target_work_days is not None:
-            target = max(0, person_target_work_days)
+            paid_leave_count = sum(1 for code in person_fixed_assignments.values() if code == "PAID")
+            target = max(0, person_target_work_days - paid_leave_count)
             model.Add(
                 sum(
                     x[(person_index, day, shift_code)]
@@ -448,6 +449,7 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
     shift_range_vars: list[cp_model.IntVar] = []
     transition_vars: list[cp_model.IntVar] = []
     shift_change_vars: list[cp_model.IntVar] = []
+    consecutive_shift_switch_vars: list[cp_model.IntVar] = []
 
     for person_index, _person in enumerate(staff):
         total = model.NewIntVar(0, len(month_info.days), f"total_{person_index}")
@@ -462,6 +464,15 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
                 change = model.NewBoolVar(f"shift_change_{person_index}_{day}_{shift_code}")
                 model.AddAbsEquality(change, x[(person_index, day, shift_code)] - x[(person_index, day + 1, shift_code)])
                 shift_change_vars.append(change)
+            for from_shift in auto_shifts:
+                for to_shift in auto_shifts:
+                    if from_shift == to_shift:
+                        continue
+                    switch = model.NewBoolVar(f"consecutive_shift_switch_{person_index}_{day}_{from_shift}_{to_shift}")
+                    model.Add(switch <= x[(person_index, day, from_shift)])
+                    model.Add(switch <= x[(person_index, day + 1, to_shift)])
+                    model.Add(switch >= x[(person_index, day, from_shift)] + x[(person_index, day + 1, to_shift)] - 1)
+                    consecutive_shift_switch_vars.append(switch)
 
     balance_total_vars = [
         total
@@ -492,12 +503,14 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
         shift_range_vars.append(diff)
 
     transition_weight = 2 if conditions.preferConsecutiveHolidays else 0
-    shift_change_weight = 60 if conditions.preferSameShiftStreaks else 0
+    shift_change_weight = 120 if conditions.preferSameShiftStreaks else 0
+    consecutive_shift_switch_weight = 50000 if conditions.preferSameShiftStreaks else 0
     model.Minimize(
         (max_total - min_total) * 100
         + sum(shift_range_vars) * 80
         + sum(transition_vars) * transition_weight
         + sum(shift_change_vars) * shift_change_weight
+        + sum(consecutive_shift_switch_vars) * consecutive_shift_switch_weight
     )
 
     solver = cp_model.CpSolver()

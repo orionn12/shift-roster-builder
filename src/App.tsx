@@ -113,6 +113,7 @@ type CoverageRuleForm = { label: string; conditions: CoverageCondition[] }
 type StructuredForm = {
   shifts: ShiftForm[]
   staffing: Record<string, StaffingEntry>
+  targetWorkDays?: number
   maxConsecutive: number
   minConsecutiveHolidays: number
   preferSameShiftStreaks: boolean
@@ -157,6 +158,7 @@ const defaultStructuredForm: StructuredForm = {
   shifts: [
   ],
   staffing: {},
+  targetWorkDays: undefined,
   maxConsecutive: 5,
   minConsecutiveHolidays: 2,
   preferSameShiftStreaks: true,
@@ -419,7 +421,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     minConsecutiveHolidays: form.minConsecutiveHolidays ?? 0,
     mustOneGroups: [],
     sameShiftGroups: [],
-    targetWorkDays: undefined,
+    targetWorkDays: form.targetWorkDays && form.targetWorkDays > 0 ? form.targetWorkDays : undefined,
     targetWorkDaysByPerson,
     fixedWeekdayShifts,
     fixedDateShifts,
@@ -553,6 +555,7 @@ function compactStructuredForm(value: unknown): StructuredForm {
     ...defaultStructuredForm,
     shifts: form.shifts ?? [],
     staffing: form.staffing ?? {},
+    targetWorkDays: form.targetWorkDays,
     maxConsecutive: form.maxConsecutive ?? defaultStructuredForm.maxConsecutive,
     minConsecutiveHolidays: form.minConsecutiveHolidays ?? defaultStructuredForm.minConsecutiveHolidays,
     preferSameShiftStreaks: form.preferSameShiftStreaks ?? defaultStructuredForm.preferSameShiftStreaks,
@@ -1504,6 +1507,21 @@ function App() {
             <label className="form-line">
               最大連勤
               <input type="number" min="1" value={structuredForm.maxConsecutive} onChange={(event) => setStructuredForm((current) => ({ ...current, maxConsecutive: Math.max(1, Number(event.target.value) || 1) }))} />
+            </label>
+            <label className="form-line">
+              勤務日数
+              <input
+                type="number"
+                min="0"
+                value={structuredForm.targetWorkDays ?? ''}
+                onChange={(event) => {
+                  const value = Number(event.target.value)
+                  setStructuredForm((current) => ({
+                    ...current,
+                    targetWorkDays: event.target.value === '' || value <= 0 ? undefined : value,
+                  }))
+                }}
+              />
             </label>
             <label className="form-line">
               最小連休
