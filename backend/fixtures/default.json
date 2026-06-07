@@ -73,11 +73,6 @@
       "C": 2,
       "E": 2
     },
-    "weekendNeed": {
-      "A": 2,
-      "C": 2,
-      "E": 2
-    },
     "autoShiftCodes": [
       "A",
       "C",
@@ -85,11 +80,8 @@
     ],
     "maxConsecutive": 6,
     "minConsecutiveHolidays": 2,
-    "preferConsecutiveHolidays": true,
     "preferSameShiftStreaks": true,
-    "fixedWeekdayShifts": {},
     "fixedDateShifts": {},
-    "allowedShifts": {},
     "unavailableWeekdayShifts": {},
     "forbiddenAlwaysShifts": {},
     "forcedOffDates": {},
@@ -106,16 +98,8 @@
     "holidayDates": [],
     "dateNeed": {},
     "coverageRules": [],
-    "staffAttributes": {},
-    "leaderGroup": [],
-    "subLeaderGroup": [],
-    "newcomerGroup": [],
-    "requireLeadershipCoverage": false,
-    "paidLeaves": {},
-    "mustOneGroups": [],
-    "sameShiftGroups": [],
-    "targetWorkDaysByPerson": {}
+    "excludedAttributes": [],
+    "staffAttributes": {}
   },
-  "previousMonthTail": {},
   "fixedAssignments": {}
 }

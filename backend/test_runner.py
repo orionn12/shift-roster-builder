@@ -120,25 +120,26 @@ def assert_staffing(request: SolveRequest, schedule) -> list[dict]:
     days = list(range(1, last_day + 1))
     conditions = request.conditions
     holiday_set = set(conditions.holidayDates)
+    excluded_attributes = {attribute for attribute in conditions.excludedAttributes if attribute}
     counted_staff = [
-        person
-        for person in request.staff
-        if conditions.staffAttributes.get(person, "") not in set(conditions.excludedAttributes)
+        person for person in request.staff
+        if conditions.staffAttributes.get(person, "") not in excluded_attributes
     ]
 
     shortfalls: list[str] = []
     for day in days:
         wd = calendar.weekday(year, month_num, day)
-        is_hol = day in holiday_set
+        key = f"{request.month}-{day:02d}"
+        is_hol = key in holiday_set
         if is_hol:
             need_map = conditions.holidayNeed
         elif wd == 5:
-            need_map = conditions.saturdayNeed or conditions.weekendNeed
+            need_map = conditions.saturdayNeed
         elif wd == 6:
-            need_map = conditions.sundayNeed or conditions.weekendNeed
+            need_map = conditions.sundayNeed
         else:
             need_map = conditions.weekdayNeed
-        override = conditions.dateNeed.get(day, {})
+        override = conditions.dateNeed.get(key, {})
         for shift_code, need in need_map.items():
             actual_need = override.get(shift_code, need)
             if actual_need == 0:
@@ -214,14 +215,11 @@ def assert_no_non_auto_leakage(request: SolveRequest, schedule) -> list[dict]:
     auto_codes = set(request.conditions.autoShiftCodes)
     violations: list[str] = []
     for person in request.staff:
-        # このスタッフに許可された非autoシフト（fixedDateShifts / fixedWeekdayShifts / fixedAssignments）
+        # このスタッフに許可された非autoシフト（fixedDateShifts / fixedAssignments）
         allowed_non_auto: set[str] = set()
         for v in request.conditions.fixedDateShifts.get(person, {}).values():
             if v not in auto_codes:
                 allowed_non_auto.add(v)
-        fw = request.conditions.fixedWeekdayShifts.get(person)
-        if fw and fw not in auto_codes:
-            allowed_non_auto.add(fw)
         for v in request.fixedAssignments.get(person, {}).values():
             if v not in auto_codes:
                 allowed_non_auto.add(v)
@@ -268,7 +266,6 @@ def assert_no_unspecified_manual_codes(request: SolveRequest, schedule) -> list[
         for person, day_map in conditions.fixedDateShifts.items()
         for day in day_map
     )
-    weekday_fixed_people = set(conditions.fixedWeekdayShifts)
     violations: list[str] = []
     for person in request.staff:
         for day_str, code in schedule.get(person, {}).items():
@@ -277,7 +274,7 @@ def assert_no_unspecified_manual_codes(request: SolveRequest, schedule) -> list[
                 violations.append(f"{person} day {day_str}: unspecified PAID")
             if code == "特休" and key not in fixed_allowed:
                 violations.append(f"{person} day {day_str}: unspecified 特休")
-            if code not in OFF_CODES and code not in auto_codes and key not in fixed_allowed and person not in weekday_fixed_people:
+            if code not in OFF_CODES and code not in auto_codes and key not in fixed_allowed:
                 violations.append(f"{person} day {day_str}: unspecified manual shift {code}")
     return [check(
         "未指定の有給・特休・常勤なし",
@@ -287,41 +284,10 @@ def assert_no_unspecified_manual_codes(request: SolveRequest, schedule) -> list[
 
 
 def assert_allowed_shifts(request: SolveRequest, schedule) -> list[dict]:
-    """allowedShifts の制限が守られているか確認する。
-    各人の自動割り当てシフトは allowedShifts で指定されたコードのみであること。
-    OFF/PAID/特休 および fixedDateShifts・fixedAssignments 由来の非autoシフトは許可。
-    """
-    results = []
-    conditions = request.conditions
-    auto_codes = set(conditions.autoShiftCodes)
-    for person, allowed in conditions.allowedShifts.items():
-        allowed_set = set(allowed)
-        # fixedDateShifts / fixedAssignments 由来のシフトは対象外
-        override_shifts: set[str] = set()
-        for v in conditions.fixedDateShifts.get(person, {}).values():
-            override_shifts.add(v)
-        for v in request.fixedAssignments.get(person, {}).values():
-            override_shifts.add(v)
-        violations: list[str] = []
-        for day_str, code in schedule.get(person, {}).items():
-            if code in OFF_CODES or code in override_shifts:
-                continue
-            # Only check codes that are supposed to be auto-assigned
-            if code in auto_codes and code not in allowed_set:
-                violations.append(f"day {day_str}: {code} (not in {sorted(allowed_set)})")
-        results.append(check(
-            f"{person} allowedShifts制限",
-            not violations,
-            "; ".join(violations[:3]) if violations else f"許可シフト {sorted(allowed_set)} のみ",
-        ))
-    return results
+    return []
 
 
 def assert_coverage_rules(request: SolveRequest, schedule) -> list[dict]:
-    """coverageRules の充足を確認する。
-    ルールが1つ: すべての条件が毎日満たされること（AND）。
-    ルールが複数: 毎日いずれか1つのルールが満たされること（OR）。
-    """
     results = []
     conditions = request.conditions
     if not conditions.coverageRules:
@@ -330,31 +296,46 @@ def assert_coverage_rules(request: SolveRequest, schedule) -> list[dict]:
     year, month_num = map(int, request.month.split("-"))
     _, last_day = calendar.monthrange(year, month_num)
     days = list(range(1, last_day + 1))
+    holiday_set = set(conditions.holidayDates)
+    auto_codes = set(conditions.autoShiftCodes)
 
-    # Build attribute -> person index set
     attr_to_persons: dict[str, set[str]] = {}
     for person, attr in conditions.staffAttributes.items():
         if attr:
             attr_to_persons.setdefault(attr, set()).add(person)
-    # Also include leaderGroup / subLeaderGroup / newcomerGroup
-    for person in conditions.leaderGroup:
-        attr_to_persons.setdefault("リーダー", set()).add(person)
-    for person in conditions.subLeaderGroup:
-        attr_to_persons.setdefault("サブリーダー", set()).add(person)
-    for person in conditions.newcomerGroup:
-        attr_to_persons.setdefault("新人", set()).add(person)
 
-    def rule_satisfied(rule_conditions: list[dict], day: int) -> bool:
-        """Returns True iff ALL conditions in a rule are met for the given day."""
-        for cond in rule_conditions:
+    def applies(rule: dict, day: int) -> bool:
+        key = f"{request.month}-{day:02d}"
+        weekday = calendar.weekday(year, month_num, day)
+        is_holiday = key in holiday_set
+        target_date = str(rule.get("date", "") or "").strip()
+        day_type = str(rule.get("dayType", "all") or "all")
+        if target_date and target_date != key:
+            return False
+        if day_type == "weekday" and (weekday >= 5 or is_holiday):
+            return False
+        if day_type == "saturday" and (weekday != 5 or is_holiday):
+            return False
+        if day_type == "sunday" and (weekday != 6 or is_holiday):
+            return False
+        if day_type == "holiday" and not is_holiday:
+            return False
+        if day_type == "weekendHoliday" and weekday < 5 and not is_holiday:
+            return False
+        return True
+
+    def rule_satisfied(rule: dict, day: int) -> bool:
+        shift = str(rule.get("shift", "") or "").strip().upper()
+        target_shifts = {shift} if shift in auto_codes else auto_codes
+        for cond in rule.get("conditions", []):
             attr = str(cond.get("attribute", "")).strip()
             needed = int(cond.get("count") or 0)
             if not attr or needed <= 0:
                 continue
             members = attr_to_persons.get(attr, set())
             working = sum(
-                1 for p in members
-                if schedule.get(p, {}).get(str(day), "OFF") not in OFF_CODES
+                1 for person in members
+                if schedule.get(person, {}).get(str(day), "OFF") in target_shifts
             )
             if working < needed:
                 return False
@@ -362,31 +343,24 @@ def assert_coverage_rules(request: SolveRequest, schedule) -> list[dict]:
 
     violations: list[str] = []
     for day in days:
-        weekday = calendar.weekday(year, month_num, day)
-        applicable = []
+        applicable_by_shift: dict[str, list[dict]] = {}
         for rule in conditions.coverageRules:
-            day_type = str(rule.get("dayType", "all") or "all")
-            if day_type == "weekday" and weekday >= 5:
-                continue
-            if day_type == "weekendHoliday" and weekday < 5:
-                continue
-            applicable.append(rule.get("conditions", []))
-        if not applicable:
-            continue
-        if len(applicable) == 1:
-            if not rule_satisfied(applicable[0], day):
-                violations.append(f"day {day}: rule not satisfied")
-        else:
-            if not any(rule_satisfied(rc, day) for rc in applicable):
-                violations.append(f"day {day}: no rule satisfied (OR)")
+            if applies(rule, day):
+                shift = str(rule.get("shift", "") or "").strip().upper()
+                applicable_by_shift.setdefault(shift, []).append(rule)
+        for shift, rules in applicable_by_shift.items():
+            if len(rules) == 1:
+                if not rule_satisfied(rules[0], day):
+                    violations.append(f"day {day} {shift or 'all'}: rule not satisfied")
+            elif not any(rule_satisfied(rule, day) for rule in rules):
+                violations.append(f"day {day} {shift or 'all'}: no rule satisfied (OR)")
 
     results.append(check(
-        "coverageRules 充足",
+        "coverageRules satisfied",
         not violations,
-        "; ".join(violations[:5]) if violations else "全日程でルール充足",
+        "; ".join(violations[:5]) if violations else "all coverage rules satisfied",
     ))
     return results
-
 
 def assert_forced_off_dates(request: SolveRequest, schedule) -> list[dict]:
     """forcedOffDates で指定した日が OFF/PAID/特休 になっているか確認する"""
@@ -477,7 +451,6 @@ def run(fixture_path: str) -> bool:
         parse_month(request.month),
         request.conditions,
         auto_shifts,
-        request.previousMonthTail,
     )
     artifact = {
         "fixture": fixture_path,

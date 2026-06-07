@@ -264,6 +264,17 @@ textarea {
   padding: 0 4px;
 }
 
+.zone-chip {
+  min-height: 24px;
+  width: auto;
+  padding: 0 7px;
+  border-radius: 5px;
+  background: #e0f2fe;
+  color: #075985;
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .special-need-block {
   border: 1px solid #e4e7eb;
   border-radius: 5px;
@@ -333,6 +344,16 @@ textarea {
   min-height: auto;
 }
 
+.condition-check-list {
+  display: grid;
+  gap: 8px;
+}
+
+.condition-check-list .check-row {
+  display: flex;
+  width: 100%;
+}
+
 .two-col-row,
 .three-col-row {
   display: grid;
@@ -371,6 +392,18 @@ textarea {
   gap: 8px;
   align-items: center;
   margin-bottom: 6px;
+}
+
+.random-leave-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px 58px 54px;
+  gap: 8px;
+  align-items: start;
+  margin-bottom: 8px;
+}
+
+.random-leave-row select[multiple] {
+  min-height: 88px;
 }
 
 .coverage-card-header {

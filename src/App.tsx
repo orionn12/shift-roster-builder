@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+﻿import { useMemo, useState } from 'react'
 import HolidayJp from '@holiday-jp/holiday_jp'
 import {
   ArrowDown,
@@ -17,7 +17,12 @@ import './App.css'
 
 type ShiftCode = string
 type Schedule = Record<string, Record<number, ShiftCode>>
-type ManualAssignments = Record<string, Record<number, ShiftCode>>
+type ManualAssignments = Record<string, Record<string, ShiftCode>>
+type PreviousMonthTail = Record<string, {
+  lastShift: string
+  consecutiveWorkDays: number
+  consecutiveOffDays: number
+}>
 
 type ShiftDefinition = {
   code: string
@@ -42,35 +47,27 @@ type ParsedConditions = {
   saturdayNeed: Record<string, number>
   sundayNeed: Record<string, number>
   holidayNeed: Record<string, number>
-  weekendNeed: Record<string, number>
-  dailyNeed: Record<string, number>
   maxConsecutive: number
   minConsecutiveHolidays: number
-  mustOneGroups: string[][]
-  sameShiftGroups: string[][]
+  solveTimeLimitSeconds: number
   targetWorkDays?: number
-  targetWorkDaysByPerson: Record<string, number>
-  fixedWeekdayShifts: Record<string, string>
-  fixedDateShifts: Record<string, Record<number, string>>
-  allowedShifts: Record<string, string[]>
-  preferConsecutiveHolidays: boolean
-  leaderGroup: string[]
-  subLeaderGroup: string[]
-  newcomerGroup: string[]
-  requireLeadershipCoverage: boolean
-  preferLeader: boolean
+  fixedDateShifts: Record<string, Record<string, string>>
   coverageRules: CoverageRuleForm[]
-  staffAttributes: Record<string, string>
   excludedAttributes: string[]
+  staffAttributes: Record<string, string>
   unavailableWeekdayShifts: Record<string, Record<string, string[]>>
   forbiddenAlwaysShifts: Record<string, string[]>
   forcedOffWeekdays: Record<string, string[]>
   requiredTransitionBreaks: Array<[string, string]>
   autoShiftCodes: string[]
-  forcedOffDates: Record<string, number[]>
-  holidayDates: number[]
-  dateNeed: Record<number, Record<string, number>>
+  forcedOffDates: Record<string, string[]>
+  holidayDates: string[]
+  dateNeed: Record<string, Record<string, number>>
   preferSameShiftStreaks: boolean
+  preferAttributeMemberBalance: boolean
+  preferShiftOverstaffBalance: boolean
+  preferConcentratedHolidays: boolean
+  randomLeaveRules: RandomLeaveRuleForSolve[]
 }
 
 type ShiftForm = {
@@ -82,18 +79,24 @@ type ShiftForm = {
 type FixedRuleForm = {
   people: string
   shift: string
-  includeHolidays: boolean
-}
-
-type AllowedRuleForm = {
-  people: string
-  shifts: string
 }
 
 type ForbiddenRuleForm = {
   person: string
   weekday: string
   shift: string
+}
+
+type RandomLeaveRuleForm = {
+  person: string
+  leaveType: 'PAID' | '特休'
+  days: number
+}
+
+type RandomLeaveRuleForSolve = {
+  people: string[]
+  leaveType: 'PAID' | '特休'
+  days: number
 }
 
 type SpecialNeedForm = {
@@ -108,7 +111,13 @@ type AttributeForm = {
 }
 
 type CoverageCondition = { attribute: string; count: number }
-type CoverageRuleForm = { label: string; conditions: CoverageCondition[] }
+type CoverageRuleForm = {
+  label: string
+  conditions: CoverageCondition[]
+  shift?: string
+  date?: string
+  dayType?: 'weekday' | 'saturday' | 'sunday' | 'holiday' | 'all'
+}
 
 type StructuredForm = {
   shifts: ShiftForm[]
@@ -116,14 +125,17 @@ type StructuredForm = {
   targetWorkDays?: number
   maxConsecutive: number
   minConsecutiveHolidays: number
+  solveTimeLimitSeconds: number
   preferSameShiftStreaks: boolean
-  preferConsecutiveHolidays: boolean
+  preferAttributeMemberBalance: boolean
+  preferShiftOverstaffBalance: boolean
+  preferConcentratedHolidays: boolean
   fixedRules: FixedRuleForm[]
-  allowedRules: AllowedRuleForm[]
   attributes: AttributeForm[]
   staffAttributes: Record<string, string>
-  excludedAttributes: string[]
   coverageRules: CoverageRuleForm[]
+  excludedAttributes: string[]
+  randomLeaveRules: RandomLeaveRuleForm[]
   forbiddenRules: ForbiddenRuleForm[]
   specialNeeds: SpecialNeedForm[]
 }
@@ -133,10 +145,11 @@ type SolveReport = {
   summary: string
   warnings: string[]
   suggestions: string[]
-  stats: Record<string, string | number>
+  stats: Record<string, string | number | string[]>
 }
 
-type SavedRoster = {
+type SavedRosterV2 = {
+  version: 2
   month: string
   staff: string[]
   structuredForm: StructuredForm
@@ -144,12 +157,17 @@ type SavedRoster = {
   manualAssignments: ManualAssignments
 }
 
-type PreviousTail = Record<string, { lastShift: string; consecutiveWorkDays: number }>
-
 type ResultNotice = {
   kind: 'success' | 'failure'
   title: string
   message: string
+}
+
+type SolveApiResult = {
+  status: string
+  message: string
+  report?: SolveReport
+  schedule?: Record<string, Record<string, string>>
 }
 
 const defaultStaff: string[] = []
@@ -161,34 +179,155 @@ const defaultStructuredForm: StructuredForm = {
   targetWorkDays: undefined,
   maxConsecutive: 5,
   minConsecutiveHolidays: 2,
-  preferSameShiftStreaks: true,
-  preferConsecutiveHolidays: true,
+  solveTimeLimitSeconds: 30,
+  preferSameShiftStreaks: false,
+  preferAttributeMemberBalance: false,
+  preferShiftOverstaffBalance: false,
+  preferConcentratedHolidays: false,
   fixedRules: [],
-  allowedRules: [],
   attributes: [],
   staffAttributes: {},
-  excludedAttributes: [],
   coverageRules: [],
+  excludedAttributes: [],
+  randomLeaveRules: [],
   forbiddenRules: [],
   specialNeeds: [],
 }
 
+const recoveryStaff: string[] = [
+  '小里', '松本', '小代', '川田', '楢崎', '浅山', '姫島', '田上', '竹井', '麻生',
+  '三輪', '高松', '芦原', '古川', '杉山', '高田', '高橋', '田島', '岩田', '近藤',
+  '今里', '原口', '古瀬',
+]
+
+const recoveryStructuredForm: StructuredForm = {
+  shifts: [
+    { code: 'A', time: '7:00-16:00', auto: true },
+    { code: 'C', time: '15:00-0:00', auto: true },
+    { code: 'E', time: '23:00-8:00', auto: true },
+    { code: 'D', time: '20:00-5:00', auto: false },
+    { code: '常勤', time: '9:00-18:00', auto: false },
+  ],
+  staffing: {
+    A: { weekday: 4, saturday: 2, sunday: 2, holiday: 2, weekdayZones: ['1', '2', '3', '4'], saturdayZones: ['1', '2', '3', '4'], sundayZones: ['1', '2', '3', '4'], holidayZones: ['1', '2', '3', '4'] },
+    C: { weekday: 3, saturday: 2, sunday: 2, holiday: 2, weekdayZones: ['1', '2', '3', '4'], saturdayZones: ['1', '2', '3', '4'], sundayZones: ['1', '2', '3', '4'], holidayZones: ['1', '2', '3', '4'] },
+    E: { weekday: 4, saturday: 4, sunday: 4, holiday: 4, weekdayZones: ['1', '2', '3', '4'], saturdayZones: ['1', '2', '3', '4'], sundayZones: ['1', '2', '3', '4'], holidayZones: ['1', '2', '3', '4'] },
+  },
+  targetWorkDays: 18,
+  maxConsecutive: 6,
+  minConsecutiveHolidays: 2,
+  solveTimeLimitSeconds: 30,
+  preferSameShiftStreaks: true,
+  preferAttributeMemberBalance: true,
+  preferShiftOverstaffBalance: true,
+  preferConcentratedHolidays: true,
+  fixedRules: [
+    { people: '小里', shift: '常勤' },
+    { people: '古川', shift: 'A' },
+    { people: '今里', shift: 'A' },
+  ],
+  attributes: [
+    { name: 'リーダー' },
+    { name: 'サブリーダー' },
+    { name: '一般' },
+    { name: '新人' },
+    { name: '責任者' },
+  ],
+  staffAttributes: {
+    小里: '責任者',
+    松本: 'リーダー',
+    小代: 'リーダー',
+    川田: 'リーダー',
+    楢崎: 'リーダー',
+    浅山: 'リーダー',
+    姫島: 'サブリーダー',
+    田上: 'サブリーダー',
+    竹井: 'サブリーダー',
+    麻生: 'サブリーダー',
+    三輪: 'サブリーダー',
+    高松: 'サブリーダー',
+    芦原: '一般',
+    古川: '一般',
+    杉山: '一般',
+    高田: '一般',
+    高橋: '一般',
+    田島: '一般',
+    岩田: '一般',
+    近藤: '一般',
+    今里: '新人',
+    原口: '新人',
+    古瀬: '新人',
+  },
+  coverageRules: [
+    { label: '', conditions: [{ attribute: 'リーダー', count: 2 }] },
+    { label: '', conditions: [{ attribute: 'リーダー', count: 1 }, { attribute: 'サブリーダー', count: 1 }] },
+    { label: '', conditions: [{ attribute: 'サブリーダー', count: 2 }] },
+    { label: '', conditions: [{ attribute: 'リーダー', count: 1 }, { attribute: '一般', count: 1 }] },
+  ],
+  excludedAttributes: ['新人'],
+  randomLeaveRules: [],
+  forbiddenRules: [
+    { person: '小代', weekday: '日曜', shift: 'C' },
+    { person: '小里', weekday: '土日祝', shift: '' },
+    { person: '松本', weekday: '土日祝', shift: '' },
+    { person: '古川', weekday: '土日祝', shift: '' },
+    { person: '今里', weekday: '土日祝', shift: '' },
+    { person: '原口', weekday: '土日祝', shift: '' },
+    { person: '古瀬', weekday: '土日祝', shift: '' },
+    { person: '松本', weekday: '', shift: 'E' },
+  ],
+  specialNeeds: [
+    { day: 20, shift: 'E', count: 5, zoneCodes: ['1', '2', '3', '4'] },
+    { day: 21, shift: 'A', count: 3, zoneCodes: ['1', '2', '3', '4'] },
+  ],
+}
+
 const baseShiftClasses = ['shift-a', 'shift-c', 'shift-e', 'shift-d', 'shift-x']
-const savedRostersKey = 'shift-roster-builder-saved-rosters'
+const savedRostersKeyLegacy = 'shift-roster-builder-saved-rosters'
+const savedRostersKeyV2 = 'shift-roster-builder-saved-rosters-v2'
+const reportStatLabels: Record<string, string> = {
+  solverStatus: '作成状態',
+  staffCount: 'スタッフ数',
+  autoShiftCount: '自動作成勤務数',
+  countedStaffCount: '必要人数カウント対象人数',
+  excludedAttributes: '除外属性',
+  days: '日数',
+  paidCount: '有休日数',
+  minWorkDays: '最小勤務日数',
+  maxWorkDays: '最大勤務日数',
+  qualityScore: '品質スコア',
+  hardViolationCount: '重大違反数',
+  softIssueCount: '確認事項数',
+  totalNeededWorkSlots: '必要勤務枠合計',
+  totalTargetWorkDays: '勤務日数目標合計',
+  solveTimeLimitSeconds: '最大実施時間(秒)',
+  solveTimeLimitMinutes: '最大実施時間(分)',
+}
 const emptyStaffingEntry = (): StaffingEntry => ({
   weekday: 0, saturday: 0, sunday: 0, holiday: 0,
   weekdayZones: [], saturdayZones: [], sundayZones: [], holidayZones: [],
 })
 
-function updateZoneCodes(current: string[], index: number, value: string): string[] {
-  const next = [...current]
-  if (index < current.length) {
-    if (value === '') next.splice(index, 1)
-    else next[index] = value
-  } else if (value !== '') {
-    next.push(value)
+function reportStatLabel(key: string) {
+  if (key === 'targetWorkDaysInput') return '勤務日数入力値'
+  if (key === 'weekdayHolidayCount') return '平日祝日数'
+  if (key === 'effectiveTargetWorkDays') return '有休差引前の勤務日数目標'
+  return reportStatLabels[key] ?? key
+}
+
+function currentMonthValue() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
+
+function reportStatValue(key: string, value: string | number | string[]) {
+  if (Array.isArray(value)) return value.join(' / ')
+  if (key === 'solverStatus') {
+    if (value === 'optimal') return '最適解'
+    if (value === 'feasible') return '作成可'
+    if (value === 'infeasible') return '作成不可'
   }
-  return next
+  return value
 }
 
 function parseShiftTimeMinutes(timeStr: string): { start: number; end: number } | null {
@@ -200,11 +339,17 @@ function parseShiftTimeMinutes(timeStr: string): { start: number; end: number } 
   return { start, end }
 }
 
+function normalizeOptionalSelectValue(value: unknown) {
+  const text = String(value ?? '').trim()
+  return text === '-' || text === '－' ? '' : text
+}
+
 function weekdayValueToKey(weekday: string): string | null {
-  if (!weekday) return null
-  const found = Object.entries(weekdayNameToIndex).find(([label]) => weekday === label)
+  const normalized = normalizeOptionalSelectValue(weekday)
+  if (!normalized) return null
+  const found = Object.entries(weekdayNameToIndex).find(([label]) => normalized === label)
   if (found) return String(found[1])
-  if (['祝', '土日', '土日祝'].includes(weekday)) return weekday
+  if (['祝', '土日', '土日祝'].includes(normalized)) return normalized
   return null
 }
 
@@ -213,10 +358,18 @@ function getMonthDays(monthValue: string) {
   return Array.from({ length: new Date(year, month, 0).getDate() }, (_, index) => index + 1)
 }
 
+function dateKey(monthValue: string, day: number) {
+  return `${monthValue}-${String(day).padStart(2, '0')}`
+}
+
 function previousMonthValue(monthValue: string) {
   const [year, month] = monthValue.split('-').map(Number)
-  const date = new Date(year, month - 2, 1)
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+  const previous = new Date(year, month - 2, 1)
+  return `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}`
+}
+
+function isNonWorkCode(code: string) {
+  return code === 'OFF' || code === 'PAID' || code === '特休'
 }
 
 function isWeekend(monthValue: string, day: number) {
@@ -286,8 +439,6 @@ const weekdayNameToIndex: Record<string, number> = {
 
 
 function buildConditionsFromForm(form: StructuredForm, staff: string[], monthValue: string): ParsedConditions {
-  const targetWorkDaysByPerson: Record<string, number> = {}
-
   // 禁止設定を先に処理し forcedOffDates を確定させる（固定シフトの除外日に使用）
   const unavailableWeekdayShifts: Record<string, Record<string, string[]>> = {}
   const forbiddenAlwaysShifts: Record<string, string[]> = {}
@@ -296,7 +447,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     const person = rule.person.trim()
     if (!person) continue
     const weekdayKey = weekdayValueToKey(rule.weekday)
-    const shift = rule.shift.trim().toUpperCase()
+    const shift = normalizeOptionalSelectValue(rule.shift).toUpperCase()
     if (weekdayKey && shift) {
       unavailableWeekdayShifts[person] = {
         ...(unavailableWeekdayShifts[person] ?? {}),
@@ -311,7 +462,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
 
   // forcedOffDates を事前に計算（固定シフト割り当てから除外するため）
   const [_year, _month] = monthValue.split('-').map(Number)
-  const forcedOffDates: Record<string, number[]> = {}
+  const forcedOffDates: Record<string, string[]> = {}
   const forcedOffDateSet: Record<string, Set<number>> = {}
   for (const [person, weekdayKeys] of Object.entries(forcedOffWeekdays)) {
     const dates: number[] = []
@@ -329,39 +480,23 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
       if (matched) dates.push(day)
     }
     if (dates.length > 0) {
-      forcedOffDates[person] = dates
+      forcedOffDates[person] = dates.map((day) => dateKey(monthValue, day))
       forcedOffDateSet[person] = new Set(dates)
     }
   }
 
   // 固定シフト: 土曜・日曜はスキップ（禁止設定で forcedOffDates が設定された平日も除外）
-  // 祝日は includeHolidays フラグで制御
-  const fixedWeekdayShifts: Record<string, string> = {}
-  const fixedDateShifts: Record<string, Record<number, string>> = {}
+  const fixedDateShifts: Record<string, Record<string, string>> = {}
   for (const rule of form.fixedRules) {
     const shift = rule.shift.toUpperCase()
     if (!shift) continue
-    const [yr, mo] = monthValue.split('-').map(Number)
     for (const person of splitPeople(rule.people, staff)) {
-      fixedWeekdayShifts[person] = shift
       fixedDateShifts[person] = {}
       for (const day of getMonthDays(monthValue)) {
-        const date = new Date(yr, mo - 1, day)
-        const jsDay = date.getDay()
-        if (jsDay === 0 || jsDay === 6) continue
-        const isHoliday = HolidayJp.isHoliday(date)
-        if (isHoliday && !rule.includeHolidays) continue
+        if (isDayOff(monthValue, day)) continue
         if (forcedOffDateSet[person]?.has(day)) continue
-        fixedDateShifts[person][day] = shift
+        fixedDateShifts[person][dateKey(monthValue, day)] = shift
       }
-    }
-  }
-
-  const allowedShifts: Record<string, string[]> = {}
-  for (const rule of form.allowedRules) {
-    const shifts = splitShiftCodes(rule.shifts)
-    for (const person of splitPeople(rule.people, staff)) {
-      allowedShifts[person] = shifts
     }
   }
 
@@ -380,14 +515,42 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     }
   }
 
-  const dateNeed: Record<number, Record<string, number>> = {}
+  const dateNeed: Record<string, Record<string, number>> = {}
   for (const special of form.specialNeeds) {
-    if (!special.day) continue
-    dateNeed[special.day] = { ...(dateNeed[special.day] ?? {}), [special.shift.toUpperCase()]: special.count }
+    if (!special.day || !special.shift) continue
+    const key = dateKey(monthValue, special.day)
+    dateNeed[key] = { ...(dateNeed[key] ?? {}), [special.shift.toUpperCase()]: special.count }
   }
 
-  const peopleByAttribute = (attribute: string) =>
-    staff.filter((person) => form.staffAttributes[person] === attribute)
+  const coverageRules: CoverageRuleForm[] = []
+  const addLinkedCoverageRule = (
+    zoneCode: string,
+    patch: Pick<CoverageRuleForm, 'shift'> & Partial<Pick<CoverageRuleForm, 'date' | 'dayType'>>,
+  ) => {
+    const index = Number(zoneCode) - 1
+    const source = form.coverageRules[index]
+    if (!source || source.conditions.length === 0) return
+    coverageRules.push({
+      label: source.label,
+      conditions: source.conditions,
+      ...patch,
+    })
+  }
+
+  for (const [code, entry] of Object.entries(form.staffing)) {
+    const shift = code.toUpperCase()
+    for (const zoneCode of entry.weekdayZones ?? []) addLinkedCoverageRule(zoneCode, { shift, dayType: 'weekday' })
+    for (const zoneCode of entry.saturdayZones ?? []) addLinkedCoverageRule(zoneCode, { shift, dayType: 'saturday' })
+    for (const zoneCode of entry.sundayZones ?? []) addLinkedCoverageRule(zoneCode, { shift, dayType: 'sunday' })
+    for (const zoneCode of entry.holidayZones ?? []) addLinkedCoverageRule(zoneCode, { shift, dayType: 'holiday' })
+  }
+  for (const special of form.specialNeeds) {
+    if (!special.day || !special.shift) continue
+    const key = dateKey(monthValue, special.day)
+    for (const zoneCode of special.zoneCodes ?? []) {
+      addLinkedCoverageRule(zoneCode, { shift: special.shift.toUpperCase(), date: key })
+    }
+  }
 
   return {
     shifts: Object.fromEntries(
@@ -410,31 +573,14 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     holidayNeed: Object.fromEntries(
       Object.entries(form.staffing).map(([code, e]) => [code.toUpperCase(), e.holiday ?? 0]),
     ),
-    weekendNeed: Object.fromEntries(
-      Object.entries(form.staffing).map(([code, e]) => [
-        code.toUpperCase(),
-        Math.max(e.saturday ?? 0, e.sunday ?? 0, e.holiday ?? 0),
-      ]),
-    ),
-    dailyNeed: {},
     maxConsecutive: form.maxConsecutive,
     minConsecutiveHolidays: form.minConsecutiveHolidays ?? 0,
-    mustOneGroups: [],
-    sameShiftGroups: [],
+    solveTimeLimitSeconds: Math.max(1, Math.floor(Number(form.solveTimeLimitSeconds) || Number((form as { solveTimeLimitMinutes?: number }).solveTimeLimitMinutes) * 60 || 30)),
     targetWorkDays: form.targetWorkDays && form.targetWorkDays > 0 ? form.targetWorkDays : undefined,
-    targetWorkDaysByPerson,
-    fixedWeekdayShifts,
     fixedDateShifts,
-    allowedShifts,
-    preferConsecutiveHolidays: form.preferConsecutiveHolidays,
-    leaderGroup: peopleByAttribute('リーダー'),
-    subLeaderGroup: peopleByAttribute('サブリーダー'),
-    newcomerGroup: peopleByAttribute('新人'),
-    requireLeadershipCoverage: false,
-    preferLeader: false,
-    coverageRules: form.coverageRules,
+    coverageRules,
+    excludedAttributes: form.excludedAttributes.filter((attribute) => attribute.trim()),
     staffAttributes: form.staffAttributes,
-    excludedAttributes: (form.excludedAttributes ?? []).filter((attribute) => attribute.trim()),
     unavailableWeekdayShifts,
     forbiddenAlwaysShifts,
     forcedOffWeekdays,
@@ -444,9 +590,19 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
     holidayDates: getMonthDays(monthValue).filter((day) => {
       const [year, month] = monthValue.split('-').map(Number)
       return HolidayJp.isHoliday(new Date(year, month - 1, day))
-    }),
+    }).map((day) => dateKey(monthValue, day)),
     dateNeed,
     preferSameShiftStreaks: form.preferSameShiftStreaks,
+    preferAttributeMemberBalance: form.preferAttributeMemberBalance,
+    preferShiftOverstaffBalance: form.preferShiftOverstaffBalance,
+    preferConcentratedHolidays: form.preferConcentratedHolidays,
+    randomLeaveRules: form.randomLeaveRules
+      .map((rule) => ({
+        people: rule.person && staff.includes(rule.person) ? [rule.person] : [],
+        leaveType: rule.leaveType === '特休' ? '特休' as const : 'PAID' as const,
+        days: Math.max(0, Math.floor(Number(rule.days) || 0)),
+      }))
+      .filter((rule) => rule.people.length > 0 && rule.days > 0),
   }
 }
 
@@ -479,13 +635,12 @@ function mergeScheduleShape(current: Schedule, staff: string[], days: number[]):
   return next
 }
 
-function pruneManualAssignments(current: ManualAssignments, staff: string[], days: number[]): ManualAssignments {
-  const daySet = new Set(days)
+function pruneManualAssignments(current: ManualAssignments, staff: string[], monthValue: string, days: number[]): ManualAssignments {
+  const dateSet = new Set(days.map((day) => dateKey(monthValue, day)))
   const next: ManualAssignments = {}
   for (const person of staff) {
     const entries = Object.entries(current[person] ?? {})
-      .map(([day, code]) => [Number(day), code] as const)
-      .filter(([day]) => daySet.has(day))
+      .filter(([day]) => dateSet.has(day))
     if (entries.length > 0) {
       next[person] = Object.fromEntries(entries)
     }
@@ -496,6 +651,7 @@ function pruneManualAssignments(current: ManualAssignments, staff: string[], day
 function sanitizeSchedule(
   current: Schedule,
   staff: string[],
+  monthValue: string,
   days: number[],
   conditions: ParsedConditions,
   manualAssignments: ManualAssignments = {},
@@ -504,15 +660,20 @@ function sanitizeSchedule(
   const autoCodes = new Set(conditions.autoShiftCodes)
   for (const person of staff) {
     const fixedDates = conditions.fixedDateShifts[person] ?? {}
-    const fixedWeekdayShift = conditions.fixedWeekdayShifts[person]
+    const randomLeaveTypes = new Set(
+      conditions.randomLeaveRules
+        .filter((rule) => rule.people.includes(person) && rule.days > 0)
+        .map((rule) => rule.leaveType),
+    )
     for (const day of days) {
+      const key = dateKey(monthValue, day)
       const code = next[person]?.[day] ?? 'OFF'
-      const manualCode = manualAssignments[person]?.[day]
-      if (code === 'PAID' && manualCode !== 'PAID' && fixedDates[day] !== 'PAID') {
+      const manualCode = manualAssignments[person]?.[key]
+      if (code === 'PAID' && manualCode !== 'PAID' && fixedDates[key] !== 'PAID' && !randomLeaveTypes.has('PAID')) {
         next[person][day] = 'OFF'
         continue
       }
-      if (code === '特休' && manualCode !== '特休' && fixedDates[day] !== '特休') {
+      if (code === '特休' && manualCode !== '特休' && fixedDates[key] !== '特休' && !randomLeaveTypes.has('特休')) {
         next[person][day] = 'OFF'
         continue
       }
@@ -522,8 +683,7 @@ function sanitizeSchedule(
         code !== '特休' &&
         !autoCodes.has(code) &&
         manualCode !== code &&
-        fixedDates[day] !== code &&
-        fixedWeekdayShift !== code
+        fixedDates[key] !== code
       ) {
         next[person][day] = 'OFF'
       }
@@ -535,13 +695,13 @@ function sanitizeSchedule(
 function buildFixedAssignmentsForSolve(
   current: ManualAssignments,
   staff: string[],
+  monthValue: string,
   days: number[],
 ): ManualAssignments {
-  const pruned = pruneManualAssignments(current, staff, days)
+  const pruned = pruneManualAssignments(current, staff, monthValue, days)
   const next: ManualAssignments = {}
   for (const person of staff) {
-    for (const [dayText, code] of Object.entries(pruned[person] ?? {})) {
-      const day = Number(dayText)
+    for (const [day, code] of Object.entries(pruned[person] ?? {})) {
       if (!next[person]) next[person] = {}
       next[person][day] = code
     }
@@ -549,96 +709,357 @@ function buildFixedAssignmentsForSolve(
   return next
 }
 
+async function postSolveRequest(payload: unknown): Promise<SolveApiResult> {
+  const endpoints = ['/api/solve', 'http://127.0.0.1:8001/api/solve', 'http://localhost:8001/api/solve']
+  let lastError: unknown = null
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const text = await response.text()
+      const data = text ? JSON.parse(text) : {}
+      if (!response.ok) {
+        const detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail ?? data)
+        throw new Error(detail || `HTTP ${response.status}`)
+      }
+      return data as SolveApiResult
+    } catch (error) {
+      lastError = error
+    }
+  }
+  const message = lastError instanceof Error ? lastError.message : 'APIに接続できませんでした。'
+  throw new Error(`CP-SATサーバーに接続できませんでした。${message}`)
+}
+
 function compactStructuredForm(value: unknown): StructuredForm {
   const form = (value && typeof value === 'object' ? value : {}) as Partial<StructuredForm>
+  const staffing: Record<string, StaffingEntry> = {}
+  for (const [code, entry] of Object.entries(form.staffing ?? {})) {
+    staffing[code] = {
+      weekday: Math.max(0, Number(entry?.weekday) || 0),
+      saturday: Math.max(0, Number(entry?.saturday) || 0),
+      sunday: Math.max(0, Number(entry?.sunday) || 0),
+      holiday: Math.max(0, Number(entry?.holiday) || 0),
+      weekdayZones: Array.isArray(entry?.weekdayZones) ? entry.weekdayZones.map(String) : [],
+      saturdayZones: Array.isArray(entry?.saturdayZones) ? entry.saturdayZones.map(String) : [],
+      sundayZones: Array.isArray(entry?.sundayZones) ? entry.sundayZones.map(String) : [],
+      holidayZones: Array.isArray(entry?.holidayZones) ? entry.holidayZones.map(String) : [],
+    }
+  }
+
   return {
     ...defaultStructuredForm,
-    shifts: form.shifts ?? [],
-    staffing: form.staffing ?? {},
-    targetWorkDays: form.targetWorkDays,
+    shifts: (form.shifts ?? []).map((shift) => ({
+      code: String(shift.code ?? ''),
+      time: String(shift.time ?? ''),
+      auto: Boolean(shift.auto),
+    })),
+    staffing,
+    targetWorkDays: form.targetWorkDays && form.targetWorkDays > 0 ? form.targetWorkDays : undefined,
     maxConsecutive: form.maxConsecutive ?? defaultStructuredForm.maxConsecutive,
     minConsecutiveHolidays: form.minConsecutiveHolidays ?? defaultStructuredForm.minConsecutiveHolidays,
+    solveTimeLimitSeconds: Math.max(1, Math.floor(Number(form.solveTimeLimitSeconds) || Number((form as { solveTimeLimitMinutes?: number }).solveTimeLimitMinutes) * 60 || defaultStructuredForm.solveTimeLimitSeconds)),
     preferSameShiftStreaks: form.preferSameShiftStreaks ?? defaultStructuredForm.preferSameShiftStreaks,
-    preferConsecutiveHolidays: form.preferConsecutiveHolidays ?? defaultStructuredForm.preferConsecutiveHolidays,
-    fixedRules: form.fixedRules ?? [],
-    allowedRules: form.allowedRules ?? [],
-    attributes: form.attributes ?? [],
+    preferAttributeMemberBalance: form.preferAttributeMemberBalance ?? defaultStructuredForm.preferAttributeMemberBalance,
+    preferShiftOverstaffBalance: form.preferShiftOverstaffBalance ?? defaultStructuredForm.preferShiftOverstaffBalance,
+    preferConcentratedHolidays: form.preferConcentratedHolidays ?? defaultStructuredForm.preferConcentratedHolidays,
+    fixedRules: (form.fixedRules ?? []).map((rule) => ({
+      people: String(rule.people ?? ''),
+      shift: String(rule.shift ?? ''),
+    })),
+    attributes: (form.attributes ?? []).map((attribute) => ({ name: String(attribute.name ?? '') })),
     staffAttributes: form.staffAttributes ?? {},
-    excludedAttributes: form.excludedAttributes ?? [],
-    coverageRules: form.coverageRules ?? [],
-    forbiddenRules: form.forbiddenRules ?? [],
-    specialNeeds: form.specialNeeds ?? [],
+    coverageRules: (form.coverageRules ?? []).map((rule) => ({
+      label: String(rule.label ?? ''),
+      conditions: (rule.conditions ?? []).map((condition) => ({
+        attribute: String(condition.attribute ?? ''),
+        count: Math.max(0, Number(condition.count) || 0),
+      })),
+    })),
+    excludedAttributes: Array.isArray(form.excludedAttributes) ? form.excludedAttributes.map(String) : [],
+    randomLeaveRules: (form.randomLeaveRules ?? []).map((rule) => {
+      const legacyPeople = (rule as unknown as { people?: unknown }).people
+      return {
+        person: typeof rule.person === 'string'
+          ? rule.person
+          : Array.isArray(legacyPeople) && legacyPeople.length > 0
+            ? String(legacyPeople[0])
+            : '',
+        leaveType: rule.leaveType === '特休' ? '特休' : 'PAID',
+        days: Math.max(0, Number(rule.days) || 0),
+      }
+    }),
+    forbiddenRules: (form.forbiddenRules ?? []).map((rule) => ({
+      person: String(rule.person ?? ''),
+      weekday: normalizeOptionalSelectValue(rule.weekday),
+      shift: normalizeOptionalSelectValue(rule.shift),
+    })),
+    specialNeeds: (form.specialNeeds ?? []).map((rule) => ({
+      day: Math.max(1, Number(rule.day) || 1),
+      shift: String(rule.shift ?? ''),
+      count: Math.max(0, Number(rule.count) || 0),
+      zoneCodes: Array.isArray(rule.zoneCodes) ? rule.zoneCodes.map(String) : [],
+    })),
   }
 }
 
-function compactSavedRoster(month: string, value: unknown): SavedRoster | null {
+function normalizeManualAssignments(value: unknown, staff: string[], monthValue: string, days: number[]): ManualAssignments {
+  const raw = (value && typeof value === 'object' ? value : {}) as Record<string, Record<string, string>>
+  const daySet = new Set(days)
+  const dateSet = new Set(days.map((day) => dateKey(monthValue, day)))
+  const next: ManualAssignments = {}
+  for (const person of staff) {
+    for (const [rawDay, code] of Object.entries(raw[person] ?? {})) {
+      const key = dateSet.has(rawDay) ? rawDay : dateKey(monthValue, Number(rawDay))
+      if (!dateSet.has(key)) continue
+      const day = Number(key.slice(-2))
+      if (!daySet.has(day)) continue
+      if (!next[person]) next[person] = {}
+      next[person][key] = String(code)
+    }
+  }
+  return next
+}
+
+function normalizeSchedule(value: unknown, staff: string[], days: number[]): Schedule {
+  const raw = (value && typeof value === 'object' ? value : {}) as Record<string, Record<string, string>>
+  const next = blankSchedule(staff, days)
+  const daySet = new Set(days)
+  for (const person of staff) {
+    for (const [rawDay, code] of Object.entries(raw[person] ?? {})) {
+      const day = Number(rawDay.length === 10 ? rawDay.slice(-2) : rawDay)
+      if (daySet.has(day)) next[person][day] = String(code)
+    }
+  }
+  return next
+}
+
+function migrateSavedRoster(monthValue: string, value: unknown): SavedRosterV2 | null {
   if (!value || typeof value !== 'object') return null
-  const roster = value as Partial<SavedRoster>
-  if (!Array.isArray(roster.staff) || !roster.schedule) return null
-
+  const roster = value as Partial<SavedRosterV2>
+  if (!Array.isArray(roster.staff)) return null
+  const days = getMonthDays(monthValue)
   const structuredForm = compactStructuredForm(roster.structuredForm)
-  const days = getMonthDays(month)
-  const manualAssignments = buildFixedAssignmentsForSolve(roster.manualAssignments ?? {}, roster.staff, days)
-  const conditions = buildConditionsFromForm(structuredForm, roster.staff, month)
-
+  const manualAssignments = normalizeManualAssignments(roster.manualAssignments, roster.staff, monthValue, days)
+  const conditions = buildConditionsFromForm(structuredForm, roster.staff, monthValue)
+  const schedule = sanitizeSchedule(
+    normalizeSchedule(roster.schedule, roster.staff, days),
+    roster.staff,
+    monthValue,
+    days,
+    conditions,
+    manualAssignments,
+  )
   return {
-    month,
+    version: 2,
+    month: monthValue,
     staff: roster.staff,
     structuredForm,
-    schedule: sanitizeSchedule(roster.schedule, roster.staff, days, conditions, manualAssignments),
+    schedule,
     manualAssignments,
   }
 }
 
-function compactSavedRosters(saved: Record<string, unknown>): Record<string, SavedRoster> {
-  return Object.fromEntries(
-    Object.entries(saved).flatMap(([month, roster]) => {
-      const compact = compactSavedRoster(month, roster)
-      return compact ? [[month, compact]] : []
-    }),
+function createRecoveryRoster(monthValue: string): SavedRosterV2 {
+  const days = getMonthDays(monthValue)
+  const structuredForm = compactStructuredForm(recoveryStructuredForm)
+  const schedule = blankSchedule(recoveryStaff, days)
+  return {
+    version: 2,
+    month: monthValue,
+    staff: recoveryStaff,
+    structuredForm,
+    schedule,
+    manualAssignments: {},
+  }
+}
+
+const staffingZoneKeys = ['weekdayZones', 'saturdayZones', 'sundayZones', 'holidayZones'] as const
+
+function repairStructuredFormForRecovery(value: unknown): StructuredForm {
+  const form = compactStructuredForm(value)
+  const recovery = compactStructuredForm(recoveryStructuredForm)
+  const nextStaffing: Record<string, StaffingEntry> = { ...form.staffing }
+  let changed = false
+
+  for (const [code, entry] of Object.entries(form.staffing)) {
+    const source = recovery.staffing[code]
+    if (!source) continue
+    const nextEntry: StaffingEntry = { ...entry }
+    for (const key of staffingZoneKeys) {
+      if ((nextEntry[key] ?? []).length === 0 && source[key].length > 0) {
+        nextEntry[key] = [...source[key]]
+        changed = true
+      }
+    }
+    nextStaffing[code] = nextEntry
+  }
+
+  const nextSpecialNeeds = form.specialNeeds.map((rule) => {
+    if ((rule.zoneCodes ?? []).length > 0) return rule
+    const source = recovery.specialNeeds.find((candidate) => candidate.day === rule.day && candidate.shift === rule.shift)
+    if (!source || source.zoneCodes.length === 0) return rule
+    changed = true
+    return { ...rule, zoneCodes: [...source.zoneCodes] }
+  })
+
+  const nextForm: StructuredForm = {
+    ...form,
+    staffing: nextStaffing,
+    specialNeeds: nextSpecialNeeds,
+  }
+
+  if (nextForm.attributes.length === 0 && recovery.attributes.length > 0) {
+    nextForm.attributes = recovery.attributes.map((attribute) => ({ ...attribute }))
+    changed = true
+  }
+  if (Object.keys(nextForm.staffAttributes).length === 0 && Object.keys(recovery.staffAttributes).length > 0) {
+    nextForm.staffAttributes = { ...recovery.staffAttributes }
+    changed = true
+  }
+  if (nextForm.coverageRules.length === 0 && recovery.coverageRules.length > 0) {
+    nextForm.coverageRules = recovery.coverageRules.map((rule) => ({
+      ...rule,
+      conditions: rule.conditions.map((condition) => ({ ...condition })),
+    }))
+    changed = true
+  }
+  if (nextForm.excludedAttributes.length === 0 && recovery.excludedAttributes.length > 0) {
+    nextForm.excludedAttributes = [...recovery.excludedAttributes]
+    changed = true
+  }
+
+  return changed ? compactStructuredForm(nextForm) : form
+}
+
+function isRecoveryTargetRoster(roster: SavedRosterV2) {
+  if (!['2026-05', '2026-06'].includes(roster.month)) return false
+  const recoveryStaffSet = new Set(recoveryStaff)
+  const matchedStaffCount = roster.staff.filter((person) => recoveryStaffSet.has(person)).length
+  return matchedStaffCount >= Math.ceil(recoveryStaff.length * 0.6)
+}
+
+function repairSavedRosterForRecovery(roster: SavedRosterV2): SavedRosterV2 {
+  if (!isRecoveryTargetRoster(roster)) return roster
+  return {
+    ...roster,
+    structuredForm: repairStructuredFormForRecovery(roster.structuredForm),
+  }
+}
+
+function isUsableSavedRoster(roster: SavedRosterV2 | undefined) {
+  if (!roster || roster.staff.length === 0) return false
+  const form = compactStructuredForm(roster.structuredForm)
+  const hasAutoShift = form.shifts.some((shift) => shift.code.trim() && shift.auto)
+  const hasStaffing = Object.values(form.staffing).some(
+    (entry) => entry.weekday > 0 || entry.saturday > 0 || entry.sunday > 0 || entry.holiday > 0,
   )
+  const hasConditionData =
+    form.attributes.length > 0 ||
+    Object.keys(form.staffAttributes).length > 0 ||
+    form.fixedRules.length > 0 ||
+    form.forbiddenRules.length > 0 ||
+    form.coverageRules.length > 0 ||
+    form.specialNeeds.length > 0
+  return hasAutoShift && hasStaffing && hasConditionData
 }
 
-function readSavedRosters(): Record<string, SavedRoster> {
-  const raw = localStorage.getItem(savedRostersKey)
-  if (!raw) return {}
+function mergeRecoveryRosters(saved: Record<string, SavedRosterV2>) {
+  let changed = false
+  for (const monthValue of ['2026-05', '2026-06']) {
+    if (!isUsableSavedRoster(saved[monthValue])) {
+      saved[monthValue] = createRecoveryRoster(monthValue)
+      changed = true
+      continue
+    }
+    const repaired = repairSavedRosterForRecovery(saved[monthValue])
+    if (JSON.stringify(repaired.structuredForm) !== JSON.stringify(saved[monthValue].structuredForm)) {
+      saved[monthValue] = repaired
+      changed = true
+    }
+  }
+  if (changed) {
+    localStorage.setItem(savedRostersKeyV2, JSON.stringify(saved))
+  }
+  return saved
+}
+
+function readSavedRosters(): Record<string, SavedRosterV2> {
+  const saved: Record<string, SavedRosterV2> = {}
+  const legacyRaw = localStorage.getItem(savedRostersKeyLegacy)
+  if (legacyRaw) {
+    try {
+      const parsedLegacy = JSON.parse(legacyRaw) as Record<string, unknown>
+      for (const [monthValue, roster] of Object.entries(parsedLegacy)) {
+        const migrated = migrateSavedRoster(monthValue, roster)
+        if (migrated) saved[monthValue] = migrated
+      }
+    } catch {
+      // Ignore legacy data that cannot be parsed.
+    }
+  }
+  const raw = localStorage.getItem(savedRostersKeyV2)
+  if (!raw) return mergeRecoveryRosters(saved)
   try {
-    return compactSavedRosters(JSON.parse(raw) as Record<string, unknown>)
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    for (const [monthValue, roster] of Object.entries(parsed)) {
+      const candidate = roster as Partial<SavedRosterV2>
+      if (
+        roster &&
+        typeof roster === 'object' &&
+        candidate.version === 2 &&
+        typeof candidate.month === 'string' &&
+        Array.isArray(candidate.staff) &&
+        candidate.structuredForm &&
+        candidate.schedule &&
+        candidate.manualAssignments
+      ) {
+        saved[monthValue] = candidate as SavedRosterV2
+        continue
+      }
+      const migrated = migrateSavedRoster(monthValue, roster)
+      if (migrated) saved[monthValue] = migrated
+    }
   } catch {
-    return {}
+    return mergeRecoveryRosters(saved)
   }
+  return mergeRecoveryRosters(saved)
 }
 
-function writeSavedRosters(saved: Record<string, SavedRoster>) {
-  localStorage.setItem(savedRostersKey, JSON.stringify(saved))
+function writeSavedRosters(saved: Record<string, SavedRosterV2>) {
+  localStorage.setItem(savedRostersKeyV2, JSON.stringify(saved))
 }
 
-function buildPreviousTail(monthValue: string, staff: string[], maxConsecutive: number): PreviousTail {
-  const previous = readSavedRosters()[previousMonthValue(monthValue)]
-  if (!previous) return {}
-  const previousDays = getMonthDays(previous.month)
-  const tail: PreviousTail = {}
+function buildPreviousMonthTail(monthValue: string, staff: string[]): PreviousMonthTail {
+  const previousMonth = previousMonthValue(monthValue)
+  const previousRoster = readSavedRosters()[previousMonth]
+  if (!previousRoster) return {}
 
+  const previousDays = getMonthDays(previousMonth)
+  const lastDay = previousDays[previousDays.length - 1]
+  const tails: PreviousMonthTail = {}
   for (const person of staff) {
-    const assignments = previous.schedule[person]
-    if (!assignments) continue
-
+    const personSchedule = previousRoster.schedule[person]
+    if (!personSchedule) continue
+    const lastShift = personSchedule[lastDay] ?? 'OFF'
     let consecutiveWorkDays = 0
-    for (const day of [...previousDays].reverse()) {
-      const code = assignments[day]
-      if (!code || code === 'OFF' || code === 'PAID') break
+    let consecutiveOffDays = 0
+    for (let index = previousDays.length - 1; index >= 0; index -= 1) {
+      const code = personSchedule[previousDays[index]] ?? 'OFF'
+      if (isNonWorkCode(code)) break
       consecutiveWorkDays += 1
-      if (consecutiveWorkDays >= maxConsecutive) break
     }
-
-    const lastDay = previousDays[previousDays.length - 1]
-    tail[person] = {
-      lastShift: assignments[lastDay] ?? 'OFF',
-      consecutiveWorkDays,
+    for (let index = previousDays.length - 1; index >= 0; index -= 1) {
+      const code = personSchedule[previousDays[index]] ?? 'OFF'
+      if (!isNonWorkCode(code)) break
+      consecutiveOffDays += 1
     }
+    tails[person] = { lastShift, consecutiveWorkDays, consecutiveOffDays }
   }
-
-  return tail
+  return tails
 }
 
 function hasRequiredStaff(conditions: ParsedConditions) {
@@ -649,13 +1070,15 @@ function hasRequiredStaff(conditions: ParsedConditions) {
   return shiftCodes.some(
     (code) =>
       (conditions.weekdayNeed[code] ?? 0) > 0 ||
-      (conditions.weekendNeed[code] ?? 0) > 0 ||
-      (conditions.dailyNeed[code] ?? 0) > 0,
+      (conditions.saturdayNeed[code] ?? 0) > 0 ||
+      (conditions.sundayNeed[code] ?? 0) > 0 ||
+      (conditions.holidayNeed[code] ?? 0) > 0,
   )
 }
 
 function App() {
-  const [month, setMonth] = useState('2026-06')
+  const initialMonth = useMemo(() => currentMonthValue(), [])
+  const [month, setMonth] = useState(initialMonth)
   const [staff, setStaff] = useState(defaultStaff)
   const [newStaff, setNewStaff] = useState('')
   const [structuredForm, setStructuredForm] = useState<StructuredForm>(defaultStructuredForm)
@@ -665,17 +1088,13 @@ function App() {
   const [lastReport, setLastReport] = useState<SolveReport | null>(null)
   const [isReportOpen, setIsReportOpen] = useState(false)
   const [resultNotice, setResultNotice] = useState<ResultNotice | null>(null)
-  const [savedMonths, setSavedMonths] = useState(() => {
-    const saved = readSavedRosters()
-    writeSavedRosters(saved)
-    return Object.keys(saved).sort()
-  })
+  const [savedMonths, setSavedMonths] = useState(() => Object.keys(readSavedRosters()).sort())
   const parsedConditions = useMemo(
     () => buildConditionsFromForm(structuredForm, staff, month),
     [structuredForm, staff, month],
   )
   const [schedule, setSchedule] = useState<Schedule>(() =>
-    blankSchedule(defaultStaff, getMonthDays('2026-06')),
+    blankSchedule(defaultStaff, getMonthDays(initialMonth)),
   )
   const [manualAssignments, setManualAssignments] = useState<ManualAssignments>({})
 
@@ -689,18 +1108,19 @@ function App() {
     ],
     [structuredForm.shifts],
   )
-  const visibleSchedule = useMemo(
-    () => sanitizeSchedule(schedule, staff, days, parsedConditions, manualAssignments),
-    [days, manualAssignments, parsedConditions, schedule, staff],
-  )
   const zoneOptions = useMemo(
-    () => structuredForm.coverageRules.map((_, i) => ({
-      value: String(i + 1),
-      label: `区分${i + 1}`,
+    () => structuredForm.coverageRules.map((_rule, index) => ({
+      code: String(index + 1),
+      label: `区分${index + 1}`,
     })),
     [structuredForm.coverageRules],
   )
-
+  const zoneLabel = (zoneCode: string) =>
+    zoneOptions.find((option) => option.code === zoneCode)?.label ?? `区分${zoneCode}`
+  const visibleSchedule = useMemo(
+    () => sanitizeSchedule(schedule, staff, month, days, parsedConditions, manualAssignments),
+    [days, manualAssignments, month, parsedConditions, schedule, staff],
+  )
   const updateShift = (index: number, patch: Partial<ShiftForm>) => {
     setStructuredForm((current) => ({
       ...current,
@@ -723,34 +1143,35 @@ function App() {
     }))
   }
 
+  const updateZoneCodes = (values: string[], nextValue: string) => {
+    if (!nextValue) return values
+    return values.includes(nextValue) ? values.filter((value) => value !== nextValue) : [...values, nextValue]
+  }
+
   const updateStaffingZones = (
     code: string,
-    dayType: 'weekday' | 'saturday' | 'sunday' | 'holiday',
-    zoneCodes: string[],
+    kind: 'weekdayZones' | 'saturdayZones' | 'sundayZones' | 'holidayZones',
+    value: string,
   ) => {
-    const zoneKey = `${dayType}Zones` as 'weekdayZones' | 'saturdayZones' | 'sundayZones' | 'holidayZones'
-    setStructuredForm((current) => ({
-      ...current,
-      staffing: {
-        ...current.staffing,
-        [code]: { ...(current.staffing[code] ?? emptyStaffingEntry()), [zoneKey]: zoneCodes },
-      },
-    }))
+    setStructuredForm((current) => {
+      const entry = current.staffing[code] ?? emptyStaffingEntry()
+      return {
+        ...current,
+        staffing: {
+          ...current.staffing,
+          [code]: {
+            ...entry,
+            [kind]: updateZoneCodes(entry[kind] ?? [], value),
+          },
+        },
+      }
+    })
   }
 
   const updateFixedRule = (index: number, patch: Partial<FixedRuleForm>) => {
     setStructuredForm((current) => ({
       ...current,
       fixedRules: current.fixedRules.map((rule, ruleIndex) =>
-        ruleIndex === index ? { ...rule, ...patch } : rule,
-      ),
-    }))
-  }
-
-  const updateAllowedRule = (index: number, patch: Partial<AllowedRuleForm>) => {
-    setStructuredForm((current) => ({
-      ...current,
-      allowedRules: current.allowedRules.map((rule, ruleIndex) =>
         ruleIndex === index ? { ...rule, ...patch } : rule,
       ),
     }))
@@ -779,11 +1200,7 @@ function App() {
   }
 
   const addFixedRule = () => {
-    setStructuredForm((current) => ({ ...current, fixedRules: [...current.fixedRules, { people: '', shift: '', includeHolidays: false }] }))
-  }
-
-  const addAllowedRule = () => {
-    setStructuredForm((current) => ({ ...current, allowedRules: [...current.allowedRules, { people: '', shifts: '' }] }))
+    setStructuredForm((current) => ({ ...current, fixedRules: [...current.fixedRules, { people: '', shift: '' }] }))
   }
 
   const addAttribute = () => {
@@ -806,19 +1223,32 @@ function App() {
     }))
   }
 
+  const addExcludedAttribute = () => {
+    setStructuredForm((current) => ({ ...current, excludedAttributes: [...current.excludedAttributes, ''] }))
+  }
+
   const updateExcludedAttribute = (index: number, value: string) => {
     setStructuredForm((current) => ({
       ...current,
-      excludedAttributes: (current.excludedAttributes ?? []).map((attribute, attributeIndex) =>
+      excludedAttributes: current.excludedAttributes.map((attribute, attributeIndex) =>
         attributeIndex === index ? value : attribute,
       ),
     }))
   }
 
-  const addExcludedAttribute = () => {
+  const addRandomLeaveRule = () => {
     setStructuredForm((current) => ({
       ...current,
-      excludedAttributes: [...(current.excludedAttributes ?? []), ''],
+      randomLeaveRules: [...current.randomLeaveRules, { person: '', leaveType: 'PAID', days: 1 }],
+    }))
+  }
+
+  const updateRandomLeaveRule = (index: number, patch: Partial<RandomLeaveRuleForm>) => {
+    setStructuredForm((current) => ({
+      ...current,
+      randomLeaveRules: current.randomLeaveRules.map((rule, ruleIndex) =>
+        ruleIndex === index ? { ...rule, ...patch } : rule,
+      ),
     }))
   }
 
@@ -897,7 +1327,7 @@ function App() {
     const nextStaff = [...staff, name]
     setStaff(nextStaff)
     setSchedule((current) => mergeScheduleShape(current, nextStaff, days))
-    setManualAssignments((current) => pruneManualAssignments(current, nextStaff, days))
+    setManualAssignments((current) => pruneManualAssignments(current, nextStaff, month, days))
     setNewStaff('')
   }
 
@@ -905,7 +1335,7 @@ function App() {
     const nextStaff = staff.filter((item) => item !== person)
     setStaff(nextStaff)
     setSchedule((current) => mergeScheduleShape(current, nextStaff, days))
-    setManualAssignments((current) => pruneManualAssignments(current, nextStaff, days))
+    setManualAssignments((current) => pruneManualAssignments(current, nextStaff, month, days))
   }
 
   const moveStaff = (index: number, direction: -1 | 1) => {
@@ -934,19 +1364,8 @@ function App() {
   const insertFixedRule = (index: number) => {
     setStructuredForm((c) => {
       const next = [...c.fixedRules]
-      next.splice(index + 1, 0, { people: '', shift: '', includeHolidays: false })
+      next.splice(index + 1, 0, { people: '', shift: '' })
       return { ...c, fixedRules: next }
-    })
-  }
-
-  const removeAllowedRule = (index: number) => {
-    setStructuredForm((c) => ({ ...c, allowedRules: c.allowedRules.filter((_, i) => i !== index) }))
-  }
-  const insertAllowedRule = (index: number) => {
-    setStructuredForm((c) => {
-      const next = [...c.allowedRules]
-      next.splice(index + 1, 0, { people: '', shifts: '' })
-      return { ...c, allowedRules: next }
     })
   }
 
@@ -972,6 +1391,28 @@ function App() {
     })
   }
 
+  const removeExcludedAttribute = (index: number) => {
+    setStructuredForm((c) => ({ ...c, excludedAttributes: c.excludedAttributes.filter((_, i) => i !== index) }))
+  }
+  const insertExcludedAttribute = (index: number) => {
+    setStructuredForm((c) => {
+      const next = [...c.excludedAttributes]
+      next.splice(index + 1, 0, '')
+      return { ...c, excludedAttributes: next }
+    })
+  }
+
+  const removeRandomLeaveRule = (index: number) => {
+    setStructuredForm((c) => ({ ...c, randomLeaveRules: c.randomLeaveRules.filter((_, i) => i !== index) }))
+  }
+  const insertRandomLeaveRule = (index: number) => {
+    setStructuredForm((c) => {
+      const next = [...c.randomLeaveRules]
+      next.splice(index + 1, 0, { person: '', leaveType: 'PAID', days: 1 })
+      return { ...c, randomLeaveRules: next }
+    })
+  }
+
   const removeForbiddenRule = (index: number) => {
     setStructuredForm((c) => ({ ...c, forbiddenRules: c.forbiddenRules.filter((_, i) => i !== index) }))
   }
@@ -980,20 +1421,6 @@ function App() {
       const next = [...c.forbiddenRules]
       next.splice(index + 1, 0, { person: '', weekday: '日曜', shift: '' })
       return { ...c, forbiddenRules: next }
-    })
-  }
-
-  const removeExcludedAttribute = (index: number) => {
-    setStructuredForm((c) => ({
-      ...c,
-      excludedAttributes: (c.excludedAttributes ?? []).filter((_, i) => i !== index),
-    }))
-  }
-  const insertExcludedAttribute = (index: number) => {
-    setStructuredForm((c) => {
-      const next = [...(c.excludedAttributes ?? [])]
-      next.splice(index + 1, 0, '')
-      return { ...c, excludedAttributes: next }
     })
   }
 
@@ -1012,14 +1439,35 @@ function App() {
     const nextDays = getMonthDays(value)
     setMonth(value)
     setSchedule((current) => mergeScheduleShape(current, staff, nextDays))
-    setManualAssignments((current) => pruneManualAssignments(current, staff, nextDays))
+    setManualAssignments((current) => pruneManualAssignments(current, staff, value, nextDays))
+  }
+
+  const applySavedRoster = (roster: SavedRosterV2) => {
+    const repairedRoster = repairSavedRosterForRecovery(roster)
+    const restoredDays = getMonthDays(repairedRoster.month)
+    const restoredStructuredForm = compactStructuredForm(repairedRoster.structuredForm)
+    const restoredManualAssignments = pruneManualAssignments(
+      repairedRoster.manualAssignments,
+      repairedRoster.staff,
+      repairedRoster.month,
+      restoredDays,
+    )
+    const restoredConditions = buildConditionsFromForm(restoredStructuredForm, repairedRoster.staff, repairedRoster.month)
+    setMonth(repairedRoster.month)
+    setStaff(repairedRoster.staff)
+    setStructuredForm(restoredStructuredForm)
+    setManualAssignments(restoredManualAssignments)
+    setSchedule(sanitizeSchedule(repairedRoster.schedule, repairedRoster.staff, repairedRoster.month, restoredDays, restoredConditions, restoredManualAssignments))
+    setLastReport(null)
+    setLastSolveMessage('')
   }
 
   const saveCurrentRoster = () => {
     const saved = readSavedRosters()
-    const cleanManualAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days)
-    const cleanSchedule = sanitizeSchedule(visibleSchedule, staff, days, parsedConditions, cleanManualAssignments)
+    const cleanManualAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, month, days)
+    const cleanSchedule = sanitizeSchedule(visibleSchedule, staff, month, days, parsedConditions, cleanManualAssignments)
     saved[month] = {
+      version: 2,
       month,
       staff,
       structuredForm,
@@ -1036,32 +1484,18 @@ function App() {
   }
 
   const loadCurrentRoster = () => {
-    const savedRosters = readSavedRosters()
-    writeSavedRosters(savedRosters)
-    setSavedMonths(Object.keys(savedRosters).sort())
-    const saved = savedRosters[month]
-    if (!saved) {
+    const saved = readSavedRosters()
+    setSavedMonths(Object.keys(saved).sort())
+    const roster = saved[month]
+    if (!roster) {
       setResultNotice({
         kind: 'failure',
-        title: '呼び出しできませんでした',
+        title: '呼び出せませんでした',
         message: `${month} の保存データがありません。`,
       })
       return
     }
-    setStaff(saved.staff)
-    const restoredForm = {
-      ...defaultStructuredForm,
-      ...saved.structuredForm,
-      excludedAttributes: saved.structuredForm.excludedAttributes ?? [],
-    }
-    const restoredManualAssignments = saved.manualAssignments
-    const restoredDays = getMonthDays(saved.month)
-    const restoredConditions = buildConditionsFromForm(restoredForm, saved.staff, saved.month)
-    setStructuredForm(restoredForm)
-    setManualAssignments(pruneManualAssignments(restoredManualAssignments, saved.staff, restoredDays))
-    setSchedule(sanitizeSchedule(saved.schedule, saved.staff, restoredDays, restoredConditions, restoredManualAssignments))
-    setLastReport(null)
-    setLastSolveMessage('')
+    applySavedRoster(roster)
     setResultNotice({
       kind: 'success',
       title: '呼び出しました',
@@ -1090,27 +1524,16 @@ function App() {
 
     setIsSolving(true)
     try {
-      const fixedAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, days)
-      setSchedule((current) => sanitizeSchedule(current, staff, days, parsedConditions, fixedAssignments))
+      const fixedAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, month, days)
+      setSchedule((current) => sanitizeSchedule(current, staff, month, days, parsedConditions, fixedAssignments))
 
-      const response = await fetch('/api/solve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          staff,
-          month,
-          conditions: parsedConditions,
-          previousMonthTail: buildPreviousTail(month, staff, parsedConditions.maxConsecutive),
-          fixedAssignments,
-        }),
+      const result = await postSolveRequest({
+        staff,
+        month,
+        conditions: parsedConditions,
+        fixedAssignments,
+        previousMonthTail: buildPreviousMonthTail(month, staff),
       })
-      if (!response.ok) throw new Error('CP-SATサーバーに接続できませんでした。')
-      const result = (await response.json()) as {
-        status: string
-        message: string
-        report?: SolveReport
-        schedule?: Record<string, Record<string, string>>
-      }
       setLastSolveMessage(result.message)
       setLastReport(result.report ?? null)
       if ((result.status === 'optimal' || result.status === 'feasible') && result.schedule) {
@@ -1240,21 +1663,26 @@ function App() {
                 const code = s.code.toUpperCase()
                 const entry = structuredForm.staffing[code] ?? emptyStaffingEntry()
                 return ([
-                  { key: `${code}-weekday`, label: `${code}平日`, dayType: 'weekday' as const, value: entry.weekday, zones: entry.weekdayZones ?? [] },
-                  { key: `${code}-saturday`, label: `${code}土`, dayType: 'saturday' as const, value: entry.saturday ?? 0, zones: entry.saturdayZones ?? [] },
-                  { key: `${code}-sunday`, label: `${code}日`, dayType: 'sunday' as const, value: entry.sunday ?? 0, zones: entry.sundayZones ?? [] },
-                  { key: `${code}-holiday`, label: `${code}祝`, dayType: 'holiday' as const, value: entry.holiday ?? 0, zones: entry.holidayZones ?? [] },
-                ] as const).map(({ key, label, dayType, value, zones }) => (
+                  { key: `${code}-weekday`, label: `${code}平日`, dayType: 'weekday' as const, zoneKey: 'weekdayZones' as const, value: entry.weekday, zones: entry.weekdayZones ?? [] },
+                  { key: `${code}-saturday`, label: `${code}土曜`, dayType: 'saturday' as const, zoneKey: 'saturdayZones' as const, value: entry.saturday ?? 0, zones: entry.saturdayZones ?? [] },
+                  { key: `${code}-sunday`, label: `${code}日曜`, dayType: 'sunday' as const, zoneKey: 'sundayZones' as const, value: entry.sunday ?? 0, zones: entry.sundayZones ?? [] },
+                  { key: `${code}-holiday`, label: `${code}祝日`, dayType: 'holiday' as const, zoneKey: 'holidayZones' as const, value: entry.holiday ?? 0, zones: entry.holidayZones ?? [] },
+                ] as const).map(({ key, label, dayType, zoneKey, value, zones }) => (
                   <div className="staffing-row-flat" key={key}>
                     <span className="staffing-row-label">{label}</span>
                     <input type="number" min="0" value={value} onChange={(e) => updateStaffing(code, dayType, e.target.value)} />
                     <div className="staffing-zones-row">
-                      {[...zones, ''].map((zc, zi) => (
-                        <select key={zi} className="zone-select" value={zc}
-                          onChange={(e) => updateStaffingZones(code, dayType, updateZoneCodes(zones, zi, e.target.value))}>
-                          <option value="">-</option>
-                          {zoneOptions.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                        </select>
+                      <span className="staffing-zone-label">区分</span>
+                      <select className="zone-select" value="" onChange={(e) => updateStaffingZones(code, zoneKey, e.target.value)}>
+                        <option value="">追加</option>
+                        {zoneOptions.map((option) => (
+                          <option key={option.code} value={option.code}>{option.label}</option>
+                        ))}
+                      </select>
+                      {zones.map((zone) => (
+                        <button type="button" className="zone-chip" key={zone} onClick={() => updateStaffingZones(code, zoneKey, zone)}>
+                          {zoneLabel(zone)}
+                        </button>
                       ))}
                     </div>
                   </div>
@@ -1285,12 +1713,16 @@ function App() {
                 </div>
                 <div className="staffing-zones-row">
                   <span className="staffing-zone-label">区分</span>
-                  {[...(rule.zoneCodes ?? []), ''].map((zc, zi) => (
-                    <select key={zi} className="zone-select" value={zc}
-                      onChange={(e) => updateSpecialNeed(index, { zoneCodes: updateZoneCodes(rule.zoneCodes ?? [], zi, e.target.value) })}>
-                      <option value="">-</option>
-                      {zoneOptions.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                    </select>
+                  <select className="zone-select" value="" onChange={(e) => updateSpecialNeed(index, { zoneCodes: updateZoneCodes(rule.zoneCodes ?? [], e.target.value) })}>
+                    <option value="">追加</option>
+                    {zoneOptions.map((option) => (
+                      <option key={option.code} value={option.code}>{option.label}</option>
+                    ))}
+                  </select>
+                  {(rule.zoneCodes ?? []).map((zone) => (
+                    <button type="button" className="zone-chip" key={zone} onClick={() => updateSpecialNeed(index, { zoneCodes: updateZoneCodes(rule.zoneCodes ?? [], zone) })}>
+                      {zoneLabel(zone)}
+                    </button>
                   ))}
                 </div>
               </div>
@@ -1359,23 +1791,65 @@ function App() {
             ))}
           </section>
 
+
           <section>
             <h2>除外設定</h2>
-            <p className="section-desc">ここに追加した属性のメンバーは、自動作成時の必要人数カウントに含めません。</p>
-            {(structuredForm.excludedAttributes ?? []).length === 0 && (
+            <p className="section-desc">ここに指定した属性は、必要人数のカウント対象から外します。</p>
+            {structuredForm.excludedAttributes.length === 0 && (
               <button type="button" className="inline-add" onClick={addExcludedAttribute}><Plus size={15} />追加</button>
             )}
-            {(structuredForm.excludedAttributes ?? []).map((attribute, index) => (
-              <div className="two-col-row" key={`excluded-${index}`}>
-                <select value={attribute} onChange={(event) => updateExcludedAttribute(index, event.target.value)} aria-label="除外属性">
+            {structuredForm.excludedAttributes.map((attribute, index) => (
+              <div className="attr-row" key={`excluded-${index}`}>
+                <select value={attribute} onChange={(event) => updateExcludedAttribute(index, event.target.value)}>
                   <option value="">-</option>
-                  {structuredForm.attributes.filter((a) => a.name.trim()).map((a) => (
-                    <option key={a.name} value={a.name}>{a.name}</option>
+                  {structuredForm.attributes.filter((item) => item.name.trim()).map((item) => (
+                    <option key={item.name} value={item.name}>{item.name}</option>
                   ))}
                 </select>
                 <div className="row-actions">
-                  <button type="button" className="row-btn" onClick={() => insertExcludedAttribute(index)} title="下に追加"><Plus size={13} /></button>
+                  <button type="button" className="row-btn" onClick={() => insertExcludedAttribute(index)} title="追加"><Plus size={13} /></button>
                   <button type="button" className="row-btn danger" onClick={() => removeExcludedAttribute(index)} title="削除"><Trash2 size={13} /></button>
+                </div>
+              </div>
+            ))}
+          </section>
+
+          <section>
+            <h2>有給特休条件(ランダム)</h2>
+            <p className="section-desc">指定したスタッフに、有給または特休を指定日数分だけ自動で配置します。</p>
+            {structuredForm.randomLeaveRules.length === 0 && (
+              <button type="button" className="inline-add" onClick={addRandomLeaveRule}><Plus size={15} />追加</button>
+            )}
+            {structuredForm.randomLeaveRules.map((rule, index) => (
+              <div className="random-leave-row" key={`random-leave-${index}`}>
+                <select
+                  value={rule.person}
+                  onChange={(event) => updateRandomLeaveRule(index, { person: event.target.value })}
+                  aria-label="スタッフ"
+                >
+                  <option value="">スタッフ</option>
+                  {staff.map((person) => (
+                    <option key={person} value={person}>{person}</option>
+                  ))}
+                </select>
+                <select
+                  value={rule.leaveType}
+                  onChange={(event) => updateRandomLeaveRule(index, { leaveType: event.target.value === '特休' ? '特休' : 'PAID' })}
+                  aria-label="有給or特休リスト"
+                >
+                  <option value="PAID">有給</option>
+                  <option value="特休">特休</option>
+                </select>
+                <input
+                  type="number"
+                  min="1"
+                  value={rule.days}
+                  onChange={(event) => updateRandomLeaveRule(index, { days: Math.max(1, Number(event.target.value) || 1) })}
+                  aria-label="日数"
+                />
+                <div className="row-actions">
+                  <button type="button" className="row-btn" onClick={() => insertRandomLeaveRule(index)} title="下に追加"><Plus size={13} /></button>
+                  <button type="button" className="row-btn danger" onClick={() => removeRandomLeaveRule(index)} title="削除"><Trash2 size={13} /></button>
                 </div>
               </div>
             ))}
@@ -1390,7 +1864,7 @@ function App() {
             {structuredForm.coverageRules.map((rule, ruleIndex) => (
               <div className="coverage-card" key={`coverage-${ruleIndex}`}>
                 <div className="coverage-card-header">
-                  <span className="coverage-card-number">区分 {ruleIndex + 1}</span>
+                  <span className="coverage-card-number">区分{ruleIndex + 1}</span>
                   <div className="row-actions">
                     <button type="button" className="row-btn" onClick={() => insertCoverageRule(ruleIndex)} title="下に追加"><Plus size={13} /></button>
                     <button type="button" className="row-btn danger" onClick={() => removeCoverageRule(ruleIndex)} title="削除"><Trash2 size={13} /></button>
@@ -1504,10 +1978,7 @@ function App() {
           <section>
             <h2>基本条件</h2>
             <p className="section-desc">最大連勤を超えた連続勤務、最小連休を下回る連続休暇を禁止します。</p>
-            <label className="form-line">
-              最大連勤
-              <input type="number" min="1" value={structuredForm.maxConsecutive} onChange={(event) => setStructuredForm((current) => ({ ...current, maxConsecutive: Math.max(1, Number(event.target.value) || 1) }))} />
-            </label>
+            <p className="section-desc">勤務日数は祝日分を含みません。有給がある場合は勤務日数から有休日数を引いた数を勤務日とします</p>
             <label className="form-line">
               勤務日数
               <input
@@ -1524,18 +1995,45 @@ function App() {
               />
             </label>
             <label className="form-line">
+              最大連勤
+              <input type="number" min="1" value={structuredForm.maxConsecutive} onChange={(event) => setStructuredForm((current) => ({ ...current, maxConsecutive: Math.max(1, Number(event.target.value) || 1) }))} />
+            </label>
+            <label className="form-line">
               最小連休
               <input type="number" min="0" value={structuredForm.minConsecutiveHolidays} onChange={(event) => setStructuredForm((current) => ({ ...current, minConsecutiveHolidays: Math.max(0, Number(event.target.value) || 0) }))} />
             </label>
+            <label className="form-line">
+              最大実施時間(秒)
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={structuredForm.solveTimeLimitSeconds}
+                onChange={(event) => setStructuredForm((current) => ({ ...current, solveTimeLimitSeconds: Math.max(1, Math.floor(Number(event.target.value) || 1)) }))}
+              />
+            </label>
+            <p className="section-desc">自動作成で解を探す最大時間です。長くすると作成品質が上がる可能性がありますが、完了まで時間がかかります。</p>
           </section>
 
           <section>
             <h2>その他条件</h2>
             <p className="section-desc">チェック時、連勤中の勤務種別切替（例：A→C→A）を極力避けます。</p>
-            <div>
+            <div className="condition-check-list">
               <label className="check-row">
                 <input type="checkbox" checked={structuredForm.preferSameShiftStreaks} onChange={(event) => setStructuredForm((current) => ({ ...current, preferSameShiftStreaks: event.target.checked }))} />
                 連勤中の勤務切替を可能な限り避ける
+              </label>
+              <label className="check-row">
+                <input type="checkbox" checked={structuredForm.preferAttributeMemberBalance} onChange={(event) => setStructuredForm((current) => ({ ...current, preferAttributeMemberBalance: event.target.checked }))} />
+                属性メンバー均等配置
+              </label>
+              <label className="check-row">
+                <input type="checkbox" checked={structuredForm.preferShiftOverstaffBalance} onChange={(event) => setStructuredForm((current) => ({ ...current, preferShiftOverstaffBalance: event.target.checked }))} />
+                各勤務均等メンバー数配置
+              </label>
+              <label className="check-row">
+                <input type="checkbox" checked={structuredForm.preferConcentratedHolidays} onChange={(event) => setStructuredForm((current) => ({ ...current, preferConcentratedHolidays: event.target.checked }))} />
+                休日を集中して長期連休を作る
               </label>
             </div>
           </section>
@@ -1602,7 +2100,7 @@ function App() {
                                   ...current,
                                   [person]: {
                                     ...(current[person] ?? {}),
-                                    [day]: nextValue,
+                                    [dateKey(month, day)]: nextValue,
                                   },
                                 }))
                               }}
@@ -1631,7 +2129,7 @@ function App() {
           <section className="report-modal" role="dialog" aria-modal="true" aria-label="作成レポート" onMouseDown={(event) => event.stopPropagation()}>
             <div className="report-header">
               <div>
-                <p className="eyebrow">Solver Report</p>
+                <p className="eyebrow">作成レポート</p>
                 <h2>{lastReport.title}</h2>
               </div>
               <button type="button" className="icon-button ghost-icon" onClick={() => setIsReportOpen(false)} title="閉じる">
@@ -1647,8 +2145,8 @@ function App() {
               <div className="report-stats">
                 {Object.entries(lastReport.stats).map(([key, value]) => (
                   <div key={key}>
-                    <span>{key}</span>
-                    <strong>{value}</strong>
+                    <span>{reportStatLabel(key)}</span>
+                    <strong>{reportStatValue(key, value)}</strong>
                   </div>
                 ))}
               </div>
@@ -1703,3 +2201,6 @@ function ReportList({ title, items }: { title: string; items: string[] }) {
 }
 
 export default App
+
+
+
