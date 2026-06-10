@@ -57,6 +57,17 @@ function highlightFillHex(code: string) {
   return 'BDD7EE'
 }
 
+function excelColumnName(columnNumber: number) {
+  let name = ''
+  let cursor = columnNumber
+  while (cursor > 0) {
+    const remainder = (cursor - 1) % 26
+    name = String.fromCharCode(65 + remainder) + name
+    cursor = Math.floor((cursor - 1) / 26)
+  }
+  return name
+}
+
 function createWorkbookStyles() {
   const border = (style: BorderStyle = 'thin') => ({ style, color: { argb: 'FF000000' } })
   const allBorders = (style: BorderStyle = 'thin') => ({
@@ -211,6 +222,17 @@ export async function exportRosterExcel(args: ExportRosterExcelArgs) {
       if (value === '休') cell.fill = solidFill('FCE4D6')
       else if (value === '有休' || value === '特休') cell.fill = solidFill('FFF2CC')
     })
+  }
+
+  const firstTableLastRow = args.staff.length + 2
+  worksheet.pageSetup = {
+    ...worksheet.pageSetup,
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 1,
+    orientation: 'landscape',
+    paperSize: 9,
+    printArea: `A1:${excelColumnName(totalCols)}${firstTableLastRow}`,
   }
 
   const workShiftCodes = uniqueWorkShiftCodes(args.shifts, args.schedule, args.staff, args.days)

@@ -367,13 +367,6 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
                             work_day[(person_index, month_info.days[j])]
                             <= sum(work_day[(person_index, month_info.days[k])] for k in range(j))
                         )
-            for j in range(1, min_holidays):
-                if j + 1 <= len(month_info.days):
-                    model.Add(
-                        work_day[(person_index, month_info.days[-(j + 1)])]
-                        <= sum(work_day[(person_index, month_info.days[-k])] for k in range(1, j + 1))
-                    )
-
     # Required shift transition breaks (e.g., no C竊但 on consecutive days)
     break_pairs = {(pair[0], pair[1]) for pair in conditions.requiredTransitionBreaks if len(pair) == 2}
     for from_shift, to_shift in break_pairs:
@@ -669,6 +662,7 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
             auto_shifts,
             status == cp_model.OPTIMAL,
             conditions,
+            request.previousMonthTail,
         ),
         schedule=schedule,
     )
@@ -688,6 +682,7 @@ def validate_roster(request: ValidateRequest) -> dict[str, Any]:
         month_info,
         request.conditions,
         auto_shifts,
+        request.previousMonthTail,
     )
     return {
         "status": "valid" if not diagnostics["hardViolations"] else "needs_review",
@@ -949,6 +944,7 @@ def build_success_report(
     auto_shifts: list[str],
     is_optimal: bool,
     conditions: Conditions,
+    previous_month_tail: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     work_counts: dict[str, int] = {}
     shift_counts: dict[str, dict[str, int]] = {}
@@ -991,6 +987,7 @@ def build_success_report(
         month_info,
         conditions,
         auto_shifts,
+        previous_month_tail,
     )
     warnings.extend(diagnostics["warnings"])
 
@@ -1034,8 +1031,10 @@ def assess_schedule_quality(
     month_info: MonthInfo,
     conditions: Conditions,
     auto_shifts: list[str],
+    previous_month_tail: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     off_codes = OFF_CODES
+    previous_month_tail = previous_month_tail or {}
     hard_violations: list[dict[str, Any]] = []
     soft_issues: list[dict[str, Any]] = []
     suggestions: list[str] = []
@@ -1106,9 +1105,12 @@ def assess_schedule_quality(
     max_consecutive_by_person: dict[str, int] = {}
     isolated_off_by_person: dict[str, list[list[int]]] = {}
     for person in staff:
+        tail = previous_month_tail.get(person, {})
+        previous_work_run = int(tail.get("consecutiveWorkDays") or 0)
+        previous_off_run = int(tail.get("consecutiveOffDays") or 0)
         work_counts[person] = 0
         shift_counts_by_person[person] = {shift: 0 for shift in auto_shifts}
-        current_run = 0
+        current_run = previous_work_run
         max_run = 0
         off_run: list[int] = []
         isolated_runs: list[list[int]] = []
@@ -1120,7 +1122,10 @@ def assess_schedule_quality(
                 if code in shift_counts_by_person[person]:
                     shift_counts_by_person[person][code] += 1
                 current_run += 1
-                if 0 < len(off_run) < conditions.minConsecutiveHolidays:
+                off_run_length = len(off_run)
+                if off_run and off_run[0] == month_info.days[0]:
+                    off_run_length += previous_off_run
+                if 0 < off_run_length < conditions.minConsecutiveHolidays:
                     isolated_runs.append(off_run)
                 off_run = []
             else:
@@ -1128,8 +1133,6 @@ def assess_schedule_quality(
                 off_run.append(day)
             max_run = max(max_run, current_run)
 
-        if 0 < len(off_run) < conditions.minConsecutiveHolidays:
-            isolated_runs.append(off_run)
         max_consecutive_by_person[person] = max_run
         isolated_off_by_person[person] = isolated_runs
         if max_run > conditions.maxConsecutive:

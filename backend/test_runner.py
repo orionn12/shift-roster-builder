@@ -92,17 +92,24 @@ def assert_min_consecutive_holidays(request: SolveRequest, schedule) -> list[dic
     for person in request.staff:
         psched = schedule.get(person, {})
         violations: list[str] = []
+        tail = request.previousMonthTail.get(person, {})
+        previous_off_run = int(tail.get("consecutiveOffDays") or 0)
         off_run = 0
+        off_run_start = 0
         for i, day in enumerate(days):
             is_off = psched.get(str(day), "OFF") in OFF_CODES
             if is_off:
+                if off_run == 0:
+                    off_run_start = day
                 off_run += 1
             else:
-                if 0 < off_run < min_hol:
+                total_off_run = off_run + (previous_off_run if off_run_start == days[0] else 0)
+                if 0 < total_off_run < min_hol:
                     start = days[i - off_run]
                     end = days[i - 1]
                     violations.append(f"day {start}〜{end}({off_run}日 < {min_hol})")
                 off_run = 0
+        off_run = 0
         if 0 < off_run < min_hol:
             violations.append(f"day {days[-off_run]}〜末({off_run}日 < {min_hol})")
         results.append(check(

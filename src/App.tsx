@@ -141,12 +141,34 @@ type StructuredForm = {
   specialNeeds: SpecialNeedForm[]
 }
 
+type QualityIssue = {
+  type?: string
+  message?: string
+  person?: string
+  day?: number
+  days?: number[]
+  shortfalls?: Record<string, { actual: number; needed: number }>
+  maxRun?: number
+  limit?: number
+  runs?: number[][]
+  range?: number
+  min?: number
+  max?: number
+  shift?: string
+  heaviest?: string[]
+  lightest?: string[]
+}
+
 type SolveReport = {
   title: string
   summary: string
   warnings: string[]
   suggestions: string[]
   stats: Record<string, string | number | string[]>
+  quality?: {
+    hardViolations?: QualityIssue[]
+    softIssues?: QualityIssue[]
+  }
 }
 
 type SavedRosterV2 = {
@@ -329,6 +351,43 @@ function reportStatValue(key: string, value: string | number | string[]) {
     if (value === 'infeasible') return '作成不可'
   }
   return value
+}
+
+function formatNames(names?: string[]) {
+  return names && names.length > 0 ? names.join('、') : '該当者なし'
+}
+
+function formatDays(days?: number[]) {
+  return days && days.length > 0 ? `${days.join('、')}日` : '日付不明'
+}
+
+function formatDayRuns(runs?: number[][]) {
+  return runs && runs.length > 0
+    ? runs.map((run) => `${run.join('、')}日`).join(' / ')
+    : '日付不明'
+}
+
+function formatQualityIssue(issue: QualityIssue) {
+  switch (issue.type) {
+    case 'missing_assignment':
+      return `${issue.person ?? 'スタッフ'}: ${formatDays(issue.days)} が未割当です。`
+    case 'staffing_shortfall': {
+      const details = Object.entries(issue.shortfalls ?? {})
+        .map(([shift, value]) => `${shift}: 必要${value.needed}人 / 実際${value.actual}人`)
+        .join('、')
+      return `${issue.day ?? '?'}日: 必要人数が不足しています。${details}`
+    }
+    case 'max_consecutive_exceeded':
+      return `${issue.person ?? 'スタッフ'}: 最大連勤が上限を超えています（実績${issue.maxRun ?? '?'}日 / 上限${issue.limit ?? '?'}日）。`
+    case 'isolated_holiday':
+      return `${issue.person ?? 'スタッフ'}: 最小連休${issue.limit ?? '?'}日を下回る休みがあります（${formatDayRuns(issue.runs)}）。`
+    case 'workload_imbalance':
+      return `勤務日数の差が大きいです（最小${issue.min ?? '?'}日 / 最大${issue.max ?? '?'}日 / 差${issue.range ?? '?'}日）。多い: ${formatNames(issue.heaviest)}、少ない: ${formatNames(issue.lightest)}。`
+    case 'shift_imbalance':
+      return `${issue.shift ?? '勤務'}勤務の偏りが大きいです（最小${issue.min ?? '?'}回 / 最大${issue.max ?? '?'}回 / 差${issue.range ?? '?'}回）。多い: ${formatNames(issue.heaviest)}、少ない: ${formatNames(issue.lightest)}。`
+    default:
+      return issue.message ?? issue.type ?? '詳細を取得できませんでした。'
+  }
 }
 
 
@@ -2144,6 +2203,14 @@ function App() {
                 ))}
               </div>
             )}
+            <ReportList
+              title="重大違反の詳細"
+              items={(lastReport.quality?.hardViolations ?? []).map(formatQualityIssue)}
+            />
+            <ReportList
+              title="確認事項の詳細"
+              items={(lastReport.quality?.softIssues ?? []).map(formatQualityIssue)}
+            />
             <ReportList title="コメント" items={lastReport.warnings} />
             <ReportList title="見直し候補" items={lastReport.suggestions} />
           </section>
