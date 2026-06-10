@@ -1,4 +1,5 @@
 ﻿import { useMemo, useState } from 'react'
+import ExcelJS from 'exceljs'
 import HolidayJp from '@holiday-jp/holiday_jp'
 import {
   ArrowDown,
@@ -329,6 +330,7 @@ function reportStatValue(key: string, value: string | number | string[]) {
   }
   return value
 }
+
 
 function parseShiftTimeMinutes(timeStr: string): { start: number; end: number } | null {
   const match = timeStr.match(/(\d{1,2}):(\d{2})\s*[-~]\s*(\d{1,2}):(\d{2})/)
@@ -1579,22 +1581,237 @@ function App() {
     }
   }
 
-  const exportCsv = () => {
-    const rows = [
-      ['担当', ...days.map((day) => `${day}(${weekdayLabel(month, day)})`), '勤務日数'].join(','),
-      ...staff.map((person) => {
-        const workDays = days.filter((day) => {
-          const code = visibleSchedule[person]?.[day]
-          return code && code !== 'OFF' && code !== 'PAID' && code !== '特休'
-        }).length
-        return [person, ...days.map((day) => visibleSchedule[person][day]), workDays].join(',')
-      }),
+  const exportExcel = async () => {
+    const displayCode = (code: string) => (code === 'OFF' ? '休' : code === 'PAID' ? '有休' : code)
+    const workDayCount = (person: string) =>
+      days.filter((day) => {
+        const code = visibleSchedule[person]?.[day]
+        return code && code !== 'OFF' && code !== 'PAID' && code !== '特休'
+      }).length
+
+    const wb = new ExcelJS.Workbook()
+    wb.creator = 'Shift Roster Builder'
+    const ws = wb.addWorksheet('勤務表')
+
+    const totalCols = days.length + 2
+    ws.columns = [
+      { width: 14 },
+      ...days.map(() => ({ width: 6 })),
+      { width: 10 },
     ]
-    const blob = new Blob([`﻿${rows.join('\n')}`], { type: 'text/csv;charset=utf-8' })
+
+    type BorderStyle = 'thin' | 'medium'
+    const bd = (style: BorderStyle = 'thin') => ({ style, color: { argb: 'FF000000' } })
+    const allBd = (style: BorderStyle = 'thin') => ({ top: bd(style), bottom: bd(style), left: bd(style), right: bd(style) })
+    const solidFill = (hex: string): ExcelJS.Fill => ({ type: 'pattern', pattern: 'solid', fgColor: { argb: `FF${hex}` } })
+    const baseFont = (bold = false, size = 10): Partial<ExcelJS.Font> => ({ name: 'Yu Gothic', size, bold })
+
+    // === Title row ===
+    const titleRow = ws.addRow([`${month} 勤務表`, ...Array(totalCols - 1).fill('')])
+    ws.mergeCells(titleRow.number, 1, titleRow.number, totalCols)
+    const titleCell = titleRow.getCell(1)
+    titleCell.fill = solidFill('D9EAF7')
+    titleCell.font = baseFont(true, 14)
+    titleCell.alignment = { horizontal: 'center', vertical: 'middle' }
+    titleRow.height = 24
+
+    // === Header row ===
+    const headerRow = ws.addRow(['担当', ...days.map((d) => `${d}(${weekdayLabel(month, d)})`), '勤務日数'])
+    headerRow.eachCell({ includeEmpty: true }, (cell) => {
+      cell.fill = solidFill('E2F0D9')
+      cell.font = baseFont(true)
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }
+      cell.border = allBd()
+    })
+    headerRow.height = 28
+
+    ws.views = [{ state: 'frozen', ySplit: 2 }]
+
+    // === Staff rows ===
+    for (const person of staff) {
+      const row = ws.addRow([
+        person,
+        ...days.map((day) => displayCode(visibleSchedule[person]?.[day] ?? 'OFF')),
+        workDayCount(person),
+      ])
+      row.height = 16
+      row.eachCell({ includeEmpty: true }, (cell, col) => {
+        cell.border = allBd()
+        if (col === 1) {
+          cell.font = baseFont(true)
+        } else if (col <= days.length + 1) {
+          cell.font = baseFont()
+          cell.alignment = { horizontal: 'center', vertical: 'middle' }
+          const v = String(cell.value ?? '')
+          if (v === '休') cell.fill = solidFill('FCE4D6')
+          else if (v === '有休' || v === '特休') cell.fill = solidFill('FFF2CC')
+        } else {
+          cell.font = baseFont()
+          cell.alignment = { horizontal: 'center', vertical: 'middle' }
+          cell.fill = solidFill('F2F2F2')
+        }
+      })
+    }
+
+    // === 人員ハイライト section ===
+    const usedWorkShiftCodes = structuredForm.shifts
+      .map((s) => s.code.trim().toUpperCase())
+      .filter(Boolean)
+      .filter((code, i, list) => list.indexOf(code) === i)
+      .filter((code) =>
+        days.some((day) =>
+          staff.some((person) => (visibleSchedule[person]?.[day] ?? '').toUpperCase() === code),
+        ),
+      )
+
+    const specialCodesUsed = (['OFF', 'PAID', '特休'] as const).filter((code) =>
+      days.some((day) =>
+        staff.some((person) => (visibleSchedule[person]?.[day] ?? 'OFF') === code),
+      ),
+    )
+
+    const hlLabel = (code: string) =>
+      code === 'OFF' ? '休み' : code === 'PAID' ? '有休' : code
+    const hlFillHex = (code: string) => {
+      if (code === 'OFF') return 'FCE4D6'
+      if (code === 'PAID') return 'FFF2CC'
+      if (code === '特休') return 'E2EFDA'
+      return 'BDD7EE'
+    }
+    const getStaffByCode = (code: string, day: number, isSpecial: boolean) =>
+      isSpecial
+        ? staff.filter((p) => (visibleSchedule[p]?.[day] ?? 'OFF') === code)
+        : staff.filter((p) => (visibleSchedule[p]?.[day] ?? '').toUpperCase() === code)
+
+    const renderHlBlock = (code: string, isSpecial: boolean) => {
+      const shiftDef = !isSpecial
+        ? structuredForm.shifts.find((s) => s.code.trim().toUpperCase() === code)
+        : undefined
+      const fullLabel = isSpecial
+        ? hlLabel(code)
+        : shiftDef?.time
+          ? `${code} (${shiftDef.time})`
+          : code
+      const fillHex = hlFillHex(code)
+
+      const staffByDay = days.map((day) => getStaffByCode(code, day, isSpecial))
+      const maxCount = Math.max(...staffByDay.map((s) => s.length), 1)
+
+      for (let slot = 0; slot < maxCount; slot++) {
+        const personRow = ws.addRow([
+          slot === 0 ? fullLabel : '',
+          ...days.map((_, di) => staffByDay[di][slot] ?? ''),
+          '',
+        ])
+        personRow.height = 16
+        personRow.eachCell({ includeEmpty: true }, (cell, col) => {
+          if (col === 1) {
+            cell.fill = solidFill(fillHex)
+            cell.font = baseFont(true)
+            cell.border = {
+              top: slot === 0 ? bd() : undefined,
+              bottom: bd(),
+              left: bd('medium'),
+              right: bd(),
+            }
+          } else {
+            cell.font = baseFont(false, 9)
+            cell.alignment = { horizontal: 'center', vertical: 'middle' }
+            cell.border = allBd()
+          }
+        })
+      }
+
+      const counts = days.map((_, di) => staffByDay[di].length)
+      const cntRow = ws.addRow([`${hlLabel(code)} 計`, ...counts, counts.reduce((a, b) => a + b, 0)])
+      cntRow.height = 16
+      cntRow.eachCell({ includeEmpty: true }, (cell, col) => {
+        cell.fill = solidFill('FCE4D6')
+        cell.font = baseFont(true)
+        cell.border = {
+          top: bd(),
+          bottom: bd('medium'),
+          left: col === 1 ? bd('medium') : bd(),
+          right: bd(),
+        }
+        if (col > 1) cell.alignment = { horizontal: 'center', vertical: 'middle' }
+      })
+    }
+
+    ws.addRow([])
+
+    const secRow = ws.addRow(['人員ハイライト', ...Array(totalCols - 1).fill('')])
+    ws.mergeCells(secRow.number, 1, secRow.number, totalCols)
+    const secCell = secRow.getCell(1)
+    secCell.fill = solidFill('FFF2CC')
+    secCell.font = baseFont(true, 11)
+    secRow.height = 20
+
+    const hlHdrRow = ws.addRow(['勤務区分', ...days.map((d) => `${d}(${weekdayLabel(month, d)})`), '合計'])
+    hlHdrRow.eachCell({ includeEmpty: true }, (cell) => {
+      cell.fill = solidFill('E2F0D9')
+      cell.font = baseFont(true)
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }
+      cell.border = allBd()
+    })
+    hlHdrRow.height = 28
+
+    for (const code of usedWorkShiftCodes) renderHlBlock(code, false)
+    for (const code of specialCodesUsed) renderHlBlock(code, true)
+
+    // === 勤務集計 section ===
+    ws.addRow([])
+
+    const summaryCodes = [...usedWorkShiftCodes, ...specialCodesUsed]
+    const summaryTotalCols = summaryCodes.length + 2
+
+    const summarySecRow = ws.addRow(['勤務集計', ...Array(summaryTotalCols - 1).fill('')])
+    ws.mergeCells(summarySecRow.number, 1, summarySecRow.number, summaryTotalCols)
+    const summarySecCell = summarySecRow.getCell(1)
+    summarySecCell.fill = solidFill('FFF2CC')
+    summarySecCell.font = baseFont(true, 11)
+    summarySecRow.height = 20
+
+    const summaryHdrRow = ws.addRow([
+      '担当',
+      ...summaryCodes.map((code) => (code === 'OFF' ? '休' : code === 'PAID' ? '有休' : code)),
+      '勤務計',
+    ])
+    summaryHdrRow.eachCell({ includeEmpty: true }, (cell) => {
+      cell.fill = solidFill('E2F0D9')
+      cell.font = baseFont(true)
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }
+      cell.border = allBd()
+    })
+    summaryHdrRow.height = 24
+
+    for (const person of staff) {
+      const codeCounts = summaryCodes.map((code) => {
+        const isSpecial = code === 'OFF' || code === 'PAID' || code === '特休'
+        return days.filter((day) => {
+          const c = visibleSchedule[person]?.[day] ?? (isSpecial ? 'OFF' : '')
+          return isSpecial ? c === code : c.toUpperCase() === code
+        }).length
+      })
+      const summaryRow = ws.addRow([person, ...codeCounts, workDayCount(person)])
+      summaryRow.height = 16
+      summaryRow.eachCell({ includeEmpty: true }, (cell, col) => {
+        cell.border = allBd()
+        if (col === 1) {
+          cell.font = baseFont(true)
+        } else {
+          cell.font = baseFont()
+          cell.alignment = { horizontal: 'center', vertical: 'middle' }
+        }
+      })
+    }
+
+    const buffer = await wb.xlsx.writeBuffer()
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `shift-roster-${month}.csv`
+    link.download = `shift-roster-${month}.xlsx`
     link.click()
     URL.revokeObjectURL(url)
   }
@@ -1614,9 +1831,9 @@ function App() {
             <FileText size={18} />
             レポート
           </button>
-          <button type="button" className="ghost" onClick={exportCsv}>
+          <button type="button" className="ghost" onClick={() => void exportExcel()}>
             <Download size={18} />
-            CSV
+            Excel
           </button>
         </div>
       </header>
