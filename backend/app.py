@@ -1,11 +1,14 @@
 ﻿from __future__ import annotations
 
 import calendar
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from ortools.sat.python import cp_model
 from pydantic import BaseModel, Field
 
@@ -75,6 +78,13 @@ class MonthInfo:
     year: int
     month: int
     days: list[int]
+
+
+def app_base_path() -> Path:
+    bundled_path = getattr(sys, "_MEIPASS", None)
+    if bundled_path:
+        return Path(bundled_path)
+    return Path(__file__).resolve().parents[1]
 
 
 app = FastAPI(title="Shift Roster Builder Solver")
@@ -1231,3 +1241,21 @@ def assess_schedule_quality(
             "daySummaries": day_summaries,
         },
     }
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def serve_frontend(full_path: str) -> FileResponse:
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API endpoint not found")
+
+    dist_dir = app_base_path() / "dist"
+    index_file = dist_dir / "index.html"
+    if not index_file.exists():
+        raise HTTPException(status_code=404, detail="Frontend build not found")
+
+    requested = (dist_dir / full_path).resolve()
+    dist_root = dist_dir.resolve()
+    if requested.is_file() and (requested == dist_root or dist_root in requested.parents):
+        return FileResponse(requested)
+
+    return FileResponse(index_file)
