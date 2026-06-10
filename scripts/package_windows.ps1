@@ -26,8 +26,9 @@ $readme = Join-Path $packageDir "README.txt"
   "3. To quit, close the black console window that opened with the app.",
   "",
   "Notes:",
-  "- Saved monthly settings are stored in the browser.",
-  "- This package uses the same URL, http://127.0.0.1:5173, so existing saved data remains available on the same PC and browser.",
+  "- Saved monthly settings are stored in data\\rosters.json inside this folder.",
+  "- Move the whole ShiftRosterBuilder folder when using another PC.",
+  "- Existing browser-saved data is copied into data\\rosters.json when the app starts or when you save.",
   "- Close any other shift-roster-builder or development server before starting this packaged app."
 ) | Set-Content -LiteralPath $readme -Encoding UTF8
 

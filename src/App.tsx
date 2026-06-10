@@ -1,4 +1,4 @@
-﻿import { useMemo, useState } from 'react'
+﻿import { useEffect, useMemo, useState } from 'react'
 import HolidayJp from '@holiday-jp/holiday_jp'
 import {
   ArrowDown,
@@ -795,6 +795,38 @@ async function postSolveRequest(payload: unknown): Promise<SolveApiResult> {
   throw new Error(`CP-SATサーバーに接続できませんでした。${message}`)
 }
 
+async function fetchStoredRosters(): Promise<Record<string, unknown>> {
+  const endpoints = ['/api/storage/rosters', 'http://127.0.0.1:8001/api/storage/rosters', 'http://localhost:8001/api/storage/rosters']
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint)
+      if (!response.ok) continue
+      const data = await response.json()
+      return (data.rosters && typeof data.rosters === 'object' ? data.rosters : data) as Record<string, unknown>
+    } catch {
+      // Fall back to browser storage when the packaged file storage is not available.
+    }
+  }
+  return {}
+}
+
+async function persistStoredRosters(saved: Record<string, SavedRosterV2>) {
+  localStorage.setItem(savedRostersKeyV2, JSON.stringify(saved))
+  const endpoints = ['/api/storage/rosters', 'http://127.0.0.1:8001/api/storage/rosters', 'http://localhost:8001/api/storage/rosters']
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rosters: saved }),
+      })
+      if (response.ok) return
+    } catch {
+      // Browser storage has already been updated.
+    }
+  }
+}
+
 function compactStructuredForm(value: unknown): StructuredForm {
   const form = (value && typeof value === 'object' ? value : {}) as Partial<StructuredForm>
   const staffing: Record<string, StaffingEntry> = {}
@@ -1048,16 +1080,36 @@ function mergeRecoveryRosters(saved: Record<string, SavedRosterV2>) {
   return saved
 }
 
+function normalizeSavedRostersRecord(source: Record<string, unknown>) {
+  const saved: Record<string, SavedRosterV2> = {}
+  for (const [monthValue, roster] of Object.entries(source)) {
+    const candidate = roster as Partial<SavedRosterV2>
+    if (
+      roster &&
+      typeof roster === 'object' &&
+      candidate.version === 2 &&
+      typeof candidate.month === 'string' &&
+      Array.isArray(candidate.staff) &&
+      candidate.structuredForm &&
+      candidate.schedule &&
+      candidate.manualAssignments
+    ) {
+      saved[monthValue] = candidate as SavedRosterV2
+      continue
+    }
+    const migrated = migrateSavedRoster(monthValue, roster)
+    if (migrated) saved[monthValue] = migrated
+  }
+  return saved
+}
+
 function readSavedRosters(): Record<string, SavedRosterV2> {
   const saved: Record<string, SavedRosterV2> = {}
   const legacyRaw = localStorage.getItem(savedRostersKeyLegacy)
   if (legacyRaw) {
     try {
       const parsedLegacy = JSON.parse(legacyRaw) as Record<string, unknown>
-      for (const [monthValue, roster] of Object.entries(parsedLegacy)) {
-        const migrated = migrateSavedRoster(monthValue, roster)
-        if (migrated) saved[monthValue] = migrated
-      }
+      Object.assign(saved, normalizeSavedRostersRecord(parsedLegacy))
     } catch {
       // Ignore legacy data that cannot be parsed.
     }
@@ -1066,37 +1118,16 @@ function readSavedRosters(): Record<string, SavedRosterV2> {
   if (!raw) return mergeRecoveryRosters(saved)
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
-    for (const [monthValue, roster] of Object.entries(parsed)) {
-      const candidate = roster as Partial<SavedRosterV2>
-      if (
-        roster &&
-        typeof roster === 'object' &&
-        candidate.version === 2 &&
-        typeof candidate.month === 'string' &&
-        Array.isArray(candidate.staff) &&
-        candidate.structuredForm &&
-        candidate.schedule &&
-        candidate.manualAssignments
-      ) {
-        saved[monthValue] = candidate as SavedRosterV2
-        continue
-      }
-      const migrated = migrateSavedRoster(monthValue, roster)
-      if (migrated) saved[monthValue] = migrated
-    }
+    Object.assign(saved, normalizeSavedRostersRecord(parsed))
   } catch {
     return mergeRecoveryRosters(saved)
   }
   return mergeRecoveryRosters(saved)
 }
 
-function writeSavedRosters(saved: Record<string, SavedRosterV2>) {
-  localStorage.setItem(savedRostersKeyV2, JSON.stringify(saved))
-}
-
-function buildPreviousMonthTail(monthValue: string, staff: string[]): PreviousMonthTail {
+function buildPreviousMonthTail(monthValue: string, staff: string[], savedRosters: Record<string, SavedRosterV2>): PreviousMonthTail {
   const previousMonth = previousMonthValue(monthValue)
-  const previousRoster = readSavedRosters()[previousMonth]
+  const previousRoster = savedRosters[previousMonth]
   if (!previousRoster) return {}
 
   const previousDays = getMonthDays(previousMonth)
@@ -1149,7 +1180,8 @@ function App() {
   const [lastReport, setLastReport] = useState<SolveReport | null>(null)
   const [isReportOpen, setIsReportOpen] = useState(false)
   const [resultNotice, setResultNotice] = useState<ResultNotice | null>(null)
-  const [savedMonths, setSavedMonths] = useState(() => Object.keys(readSavedRosters()).sort())
+  const [savedRosters, setSavedRosters] = useState<Record<string, SavedRosterV2>>(() => readSavedRosters())
+  const savedMonths = useMemo(() => Object.keys(savedRosters).sort(), [savedRosters])
   const parsedConditions = useMemo(
     () => buildConditionsFromForm(structuredForm, staff, month),
     [structuredForm, staff, month],
@@ -1158,6 +1190,25 @@ function App() {
     blankSchedule(defaultStaff, getMonthDays(initialMonth)),
   )
   const [manualAssignments, setManualAssignments] = useState<ManualAssignments>({})
+
+  useEffect(() => {
+    let cancelled = false
+    const syncStoredRosters = async () => {
+      const browserSaved = readSavedRosters()
+      const fileSaved = normalizeSavedRostersRecord(await fetchStoredRosters())
+      const merged = mergeRecoveryRosters({ ...browserSaved, ...fileSaved })
+      if (cancelled) return
+      setSavedRosters(merged)
+      localStorage.setItem(savedRostersKeyV2, JSON.stringify(merged))
+      if (Object.keys(browserSaved).length > 0 || Object.keys(fileSaved).length > 0) {
+        await persistStoredRosters(merged)
+      }
+    }
+    void syncStoredRosters()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const days = useMemo(() => getMonthDays(month), [month])
   const allShiftOptions = useMemo(
@@ -1523,8 +1574,8 @@ function App() {
     setLastSolveMessage('')
   }
 
-  const saveCurrentRoster = () => {
-    const saved = readSavedRosters()
+  const saveCurrentRoster = async () => {
+    const saved = { ...savedRosters }
     const cleanManualAssignments = buildFixedAssignmentsForSolve(manualAssignments, staff, month, days)
     const cleanSchedule = sanitizeSchedule(visibleSchedule, staff, month, days, parsedConditions, cleanManualAssignments)
     saved[month] = {
@@ -1535,8 +1586,8 @@ function App() {
       schedule: cleanSchedule,
       manualAssignments: cleanManualAssignments,
     }
-    writeSavedRosters(saved)
-    setSavedMonths(Object.keys(saved).sort())
+    setSavedRosters(saved)
+    await persistStoredRosters(saved)
     setResultNotice({
       kind: 'success',
       title: '保存しました',
@@ -1544,9 +1595,9 @@ function App() {
     })
   }
 
-  const loadCurrentRoster = () => {
-    const saved = readSavedRosters()
-    setSavedMonths(Object.keys(saved).sort())
+  const loadCurrentRoster = async () => {
+    const saved = mergeRecoveryRosters({ ...readSavedRosters(), ...normalizeSavedRostersRecord(await fetchStoredRosters()) })
+    setSavedRosters(saved)
     const roster = saved[month]
     if (!roster) {
       setResultNotice({
@@ -1593,7 +1644,7 @@ function App() {
         month,
         conditions: parsedConditions,
         fixedAssignments,
-        previousMonthTail: buildPreviousMonthTail(month, staff),
+        previousMonthTail: buildPreviousMonthTail(month, staff, savedRosters),
       })
       setLastSolveMessage(result.message)
       setLastReport(result.report ?? null)

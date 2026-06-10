@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import calendar
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -87,6 +88,12 @@ def app_base_path() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def app_data_path() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "data"
+    return Path(__file__).resolve().parents[1] / "data"
+
+
 app = FastAPI(title="Shift Roster Builder Solver")
 app.add_middleware(
     CORSMiddleware,
@@ -100,6 +107,32 @@ app.add_middleware(
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/storage/rosters")
+def read_roster_storage() -> dict[str, Any]:
+    storage_file = app_data_path() / "rosters.json"
+    if not storage_file.exists():
+        return {"rosters": {}, "path": str(storage_file)}
+    try:
+        return {"rosters": json.loads(storage_file.read_text(encoding="utf-8")), "path": str(storage_file)}
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"保存データを読み取れませんでした: {exc}") from exc
+
+
+@app.post("/api/storage/rosters")
+def write_roster_storage(payload: dict[str, Any]) -> dict[str, str]:
+    rosters = payload.get("rosters", payload)
+    if not isinstance(rosters, dict):
+        raise HTTPException(status_code=400, detail="保存データの形式が正しくありません。")
+
+    data_dir = app_data_path()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    storage_file = data_dir / "rosters.json"
+    temp_file = data_dir / "rosters.json.tmp"
+    temp_file.write_text(json.dumps(rosters, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_file.replace(storage_file)
+    return {"status": "ok", "path": str(storage_file)}
 
 
 def previous_tail_int(previous_month_tail: dict[str, dict[str, Any]], person: str, key: str) -> int:
