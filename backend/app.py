@@ -92,6 +92,14 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def previous_tail_int(previous_month_tail: dict[str, dict[str, Any]], person: str, key: str) -> int:
+    return int(previous_month_tail.get(person, {}).get(key) or 0)
+
+
+def previous_tail_text(previous_month_tail: dict[str, dict[str, Any]], person: str, key: str) -> str:
+    return str(previous_month_tail.get(person, {}).get(key, "") or "")
+
+
 @app.post("/api/solve", response_model=SolveResponse)
 def solve_roster(request: SolveRequest) -> SolveResponse:
     month_info = parse_month(request.month)
@@ -316,8 +324,7 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
     # Max consecutive work days
     max_consecutive = max(1, conditions.maxConsecutive)
     for person_index, person in enumerate(staff):
-        tail = request.previousMonthTail.get(person, {})
-        previous_work_run = int(tail.get("consecutiveWorkDays") or 0)
+        previous_work_run = previous_tail_int(request.previousMonthTail, person, "consecutiveWorkDays")
         if previous_work_run > 0 and month_info.days:
             first_break_window_size = max_consecutive - previous_work_run + 1
             if first_break_window_size <= 0:
@@ -336,10 +343,9 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
     min_holidays = conditions.minConsecutiveHolidays
     if min_holidays >= 2:
         for person_index, person in enumerate(staff):
-            tail = request.previousMonthTail.get(person, {})
-            previous_off_run = int(tail.get("consecutiveOffDays") or 0)
-            previous_work_run = int(tail.get("consecutiveWorkDays") or 0)
-            previous_last_shift = str(tail.get("lastShift", "") or "")
+            previous_off_run = previous_tail_int(request.previousMonthTail, person, "consecutiveOffDays")
+            previous_work_run = previous_tail_int(request.previousMonthTail, person, "consecutiveWorkDays")
+            previous_last_shift = previous_tail_text(request.previousMonthTail, person, "lastShift")
             # Mid-month: forbid OFF runs shorter than min_holidays
             for j in range(1, min_holidays):
                 for i in range(len(month_info.days) - j - 1):
@@ -373,7 +379,7 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
         if from_shift not in auto_shifts or to_shift not in auto_shifts:
             continue
         for person_index in range(len(staff)):
-            previous_last_shift = str(request.previousMonthTail.get(staff[person_index], {}).get("lastShift", "") or "")
+            previous_last_shift = previous_tail_text(request.previousMonthTail, staff[person_index], "lastShift")
             if previous_last_shift == from_shift and month_info.days:
                 model.Add(x[(person_index, month_info.days[0], to_shift)] == 0)
             for i in range(len(month_info.days) - 1):
@@ -412,8 +418,8 @@ def solve_roster(request: SolveRequest) -> SolveResponse:
         model.Add(total == sum(work_day[(person_index, day)] for day in month_info.days))
         total_work_vars.append(total)
 
-        previous_last_shift = str(request.previousMonthTail.get(person, {}).get("lastShift", "") or "")
-        previous_work_run = int(request.previousMonthTail.get(person, {}).get("consecutiveWorkDays") or 0)
+        previous_last_shift = previous_tail_text(request.previousMonthTail, person, "lastShift")
+        previous_work_run = previous_tail_int(request.previousMonthTail, person, "consecutiveWorkDays")
         if previous_work_run > 0 and previous_last_shift in auto_shifts and month_info.days:
             first_day = month_info.days[0]
             for shift_code in auto_shifts:
@@ -1105,9 +1111,8 @@ def assess_schedule_quality(
     max_consecutive_by_person: dict[str, int] = {}
     isolated_off_by_person: dict[str, list[list[int]]] = {}
     for person in staff:
-        tail = previous_month_tail.get(person, {})
-        previous_work_run = int(tail.get("consecutiveWorkDays") or 0)
-        previous_off_run = int(tail.get("consecutiveOffDays") or 0)
+        previous_work_run = previous_tail_int(previous_month_tail, person, "consecutiveWorkDays")
+        previous_off_run = previous_tail_int(previous_month_tail, person, "consecutiveOffDays")
         work_counts[person] = 0
         shift_counts_by_person[person] = {shift: 0 for shift in auto_shifts}
         current_run = previous_work_run
