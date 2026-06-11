@@ -31,7 +31,6 @@ $readme = Join-Path $packageDir "README.txt"
   "Notes:",
   "- Saved monthly settings are stored in data\\rosters.json inside this folder.",
   "- Move the whole ShiftRosterBuilder folder when using another PC.",
-  "- Existing browser-saved data is copied into data\\rosters.json when the app starts or when you save.",
   "- Close any other shift-roster-builder or development server before starting this packaged app."
 ) | Set-Content -LiteralPath $readme -Encoding UTF8
 

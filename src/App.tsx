@@ -306,8 +306,6 @@ const recoveryStructuredForm: StructuredForm = {
 }
 
 const baseShiftClasses = ['shift-a', 'shift-c', 'shift-e', 'shift-d', 'shift-x']
-const savedRostersKeyLegacy = 'shift-roster-builder-saved-rosters'
-const savedRostersKeyV2 = 'shift-roster-builder-saved-rosters-v2'
 const reportStatLabels: Record<string, string> = {
   solverStatus: '作成状態',
   staffCount: 'スタッフ数',
@@ -804,7 +802,7 @@ async function fetchStoredRosters(): Promise<Record<string, unknown>> {
       const data = await response.json()
       return (data.rosters && typeof data.rosters === 'object' ? data.rosters : data) as Record<string, unknown>
     } catch {
-      // Fall back to browser storage when the packaged file storage is not available.
+      // Try the next endpoint.
     }
   }
   return {}
@@ -1108,28 +1106,6 @@ function normalizeSavedRostersRecord(source: Record<string, unknown>) {
   return saved
 }
 
-function readBrowserSavedRosters(): Record<string, SavedRosterV2> {
-  const saved: Record<string, SavedRosterV2> = {}
-  const legacyRaw = localStorage.getItem(savedRostersKeyLegacy)
-  if (legacyRaw) {
-    try {
-      const parsedLegacy = JSON.parse(legacyRaw) as Record<string, unknown>
-      Object.assign(saved, normalizeSavedRostersRecord(parsedLegacy))
-    } catch {
-      // Ignore legacy data that cannot be parsed.
-    }
-  }
-  const raw = localStorage.getItem(savedRostersKeyV2)
-  if (!raw) return repairSavedRosters(saved)
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-    Object.assign(saved, normalizeSavedRostersRecord(parsed))
-  } catch {
-    return repairSavedRosters(saved)
-  }
-  return repairSavedRosters(saved)
-}
-
 function buildPreviousMonthTail(monthValue: string, staff: string[], savedRosters: Record<string, SavedRosterV2>): PreviousMonthTail {
   const previousMonth = previousMonthValue(monthValue)
   const previousRoster = savedRosters[previousMonth]
@@ -1199,14 +1175,9 @@ function App() {
   useEffect(() => {
     let cancelled = false
     const syncStoredRosters = async () => {
-      const browserSaved = readBrowserSavedRosters()
       const fileSaved = repairSavedRosters(normalizeSavedRostersRecord(await fetchStoredRosters()))
-      const merged = repairSavedRosters({ ...browserSaved, ...fileSaved })
       if (cancelled) return
-      setSavedRosters(merged)
-      if (Object.keys(fileSaved).length === 0 && Object.keys(browserSaved).length > 0) {
-        await persistStoredRosters(merged)
-      }
+      setSavedRosters(fileSaved)
     }
     void syncStoredRosters()
     return () => {

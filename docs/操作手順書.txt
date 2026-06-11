@@ -7,30 +7,25 @@
 - 黒い画面を閉じるとアプリも終了します。
 
 2. 保存データの場所
-- 正式な保存データは ShiftRosterBuilder\data\rosters.json です。
-- 保存、呼び出し、前月参照はこの rosters.json を使用します。
-- data フォルダがない場合は、初回保存時に自動で作成されます。
+- 保存データは ShiftRosterBuilder\data\rosters.json です。
+- 保存、呼び出し、前月参照はこの rosters.json だけを使用します。
+- 他の保存場所は使用しません。
 
-3. 既存ブラウザ保存データの初回移行
-- 以前の版でブラウザ内に保存されていたデータがある場合、data\rosters.json が空のときだけ初回起動時に移行します。
-- 移行後は data\rosters.json を正式な保存データとして扱います。
-- 以後の保存、呼び出しは data\rosters.json を使います。
-
-4. 別PCへ持っていく場合
+3. 別PCへ持っていく場合
 - ShiftRosterBuilder フォルダごとコピーしてください。
 - 保存済みデータを持っていく場合は data フォルダも必ず一緒にコピーしてください。
 - ShiftRosterBuilder\data\rosters.json が存在していれば、別PCでも同じ保存データを呼び出せます。
 
-5. プログラム更新時の保存データ退避
-- 更新前に ShiftRosterBuilder\data フォルダを別の場所へコピーして退避してください。
-- 新しい ShiftRosterBuilder フォルダを配置したあと、退避していた data フォルダを新しい ShiftRosterBuilder フォルダ内へ戻してください。
-- 最終的に ShiftRosterBuilder\data\rosters.json という配置になっていれば読み込めます。
+4. プログラム更新時の保存データ退避
+- 更新前に ShiftRosterBuilder\data\rosters.json を別の場所へコピーして退避してください。
+- 新しい ShiftRosterBuilder フォルダを配置したあと、退避していた rosters.json を新しい ShiftRosterBuilder\data\rosters.json として配置してください。
+- この配置になっていれば、更新後も過去の保存データを読み込めます。
 
-6. ZIPについて
+5. ZIPについて
 - ShiftRosterBuilder.zip は、圧縮した時点の ShiftRosterBuilder フォルダをまとめたものです。
-- 圧縮時点で data フォルダが存在していれば、保存データもZIPに含まれます。
-- 圧縮時点で data フォルダが存在しない場合、ZIPには保存データは含まれません。
+- 圧縮時点で data\rosters.json が存在していれば、保存データもZIPに含まれます。
+- 保存データを含めて配布したい場合は、data\rosters.json がある状態でZIP化してください。
 
-7. 注意
+6. 注意
 - rosters.json を手動編集すると読み込めなくなる可能性があります。
-- 編集や更新の前には必ず data フォルダごとコピーしてください。
+- 編集や更新の前には必ず rosters.json のコピーを取ってください。
