@@ -811,7 +811,6 @@ async function fetchStoredRosters(): Promise<Record<string, unknown>> {
 }
 
 async function persistStoredRosters(saved: Record<string, SavedRosterV2>) {
-  localStorage.setItem(savedRostersKeyV2, JSON.stringify(saved))
   const endpoints = ['/api/storage/rosters', 'http://127.0.0.1:8001/api/storage/rosters', 'http://localhost:8001/api/storage/rosters']
   for (const endpoint of endpoints) {
     try {
@@ -822,9 +821,10 @@ async function persistStoredRosters(saved: Record<string, SavedRosterV2>) {
       })
       if (response.ok) return
     } catch {
-      // Browser storage has already been updated.
+      // Try the next endpoint.
     }
   }
+  throw new Error('保存データファイルに書き込めませんでした。')
 }
 
 function compactStructuredForm(value: unknown): StructuredForm {
@@ -1074,10 +1074,15 @@ function mergeRecoveryRosters(saved: Record<string, SavedRosterV2>) {
       changed = true
     }
   }
-  if (changed) {
-    localStorage.setItem(savedRostersKeyV2, JSON.stringify(saved))
-  }
   return saved
+}
+
+function repairSavedRosters(saved: Record<string, SavedRosterV2>) {
+  const repaired: Record<string, SavedRosterV2> = {}
+  for (const [monthValue, roster] of Object.entries(saved)) {
+    repaired[monthValue] = repairSavedRosterForRecovery(roster)
+  }
+  return repaired
 }
 
 function normalizeSavedRostersRecord(source: Record<string, unknown>) {
@@ -1103,7 +1108,7 @@ function normalizeSavedRostersRecord(source: Record<string, unknown>) {
   return saved
 }
 
-function readSavedRosters(): Record<string, SavedRosterV2> {
+function readBrowserSavedRosters(): Record<string, SavedRosterV2> {
   const saved: Record<string, SavedRosterV2> = {}
   const legacyRaw = localStorage.getItem(savedRostersKeyLegacy)
   if (legacyRaw) {
@@ -1115,14 +1120,14 @@ function readSavedRosters(): Record<string, SavedRosterV2> {
     }
   }
   const raw = localStorage.getItem(savedRostersKeyV2)
-  if (!raw) return mergeRecoveryRosters(saved)
+  if (!raw) return repairSavedRosters(saved)
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
     Object.assign(saved, normalizeSavedRostersRecord(parsed))
   } catch {
-    return mergeRecoveryRosters(saved)
+    return repairSavedRosters(saved)
   }
-  return mergeRecoveryRosters(saved)
+  return repairSavedRosters(saved)
 }
 
 function buildPreviousMonthTail(monthValue: string, staff: string[], savedRosters: Record<string, SavedRosterV2>): PreviousMonthTail {
@@ -1180,7 +1185,7 @@ function App() {
   const [lastReport, setLastReport] = useState<SolveReport | null>(null)
   const [isReportOpen, setIsReportOpen] = useState(false)
   const [resultNotice, setResultNotice] = useState<ResultNotice | null>(null)
-  const [savedRosters, setSavedRosters] = useState<Record<string, SavedRosterV2>>(() => readSavedRosters())
+  const [savedRosters, setSavedRosters] = useState<Record<string, SavedRosterV2>>({})
   const savedMonths = useMemo(() => Object.keys(savedRosters).sort(), [savedRosters])
   const parsedConditions = useMemo(
     () => buildConditionsFromForm(structuredForm, staff, month),
@@ -1194,13 +1199,12 @@ function App() {
   useEffect(() => {
     let cancelled = false
     const syncStoredRosters = async () => {
-      const browserSaved = readSavedRosters()
-      const fileSaved = normalizeSavedRostersRecord(await fetchStoredRosters())
-      const merged = mergeRecoveryRosters({ ...browserSaved, ...fileSaved })
+      const browserSaved = readBrowserSavedRosters()
+      const fileSaved = repairSavedRosters(normalizeSavedRostersRecord(await fetchStoredRosters()))
+      const merged = repairSavedRosters({ ...browserSaved, ...fileSaved })
       if (cancelled) return
       setSavedRosters(merged)
-      localStorage.setItem(savedRostersKeyV2, JSON.stringify(merged))
-      if (Object.keys(browserSaved).length > 0 || Object.keys(fileSaved).length > 0) {
+      if (Object.keys(fileSaved).length === 0 && Object.keys(browserSaved).length > 0) {
         await persistStoredRosters(merged)
       }
     }
@@ -1587,16 +1591,25 @@ function App() {
       manualAssignments: cleanManualAssignments,
     }
     setSavedRosters(saved)
-    await persistStoredRosters(saved)
-    setResultNotice({
-      kind: 'success',
-      title: '保存しました',
-      message: `${month} の勤務表を保存しました。`,
-    })
+    try {
+      await persistStoredRosters(saved)
+      setResultNotice({
+        kind: 'success',
+        title: '保存しました',
+        message: `${month} の勤務表を保存しました。`,
+      })
+    } catch (error) {
+      setSavedRosters(savedRosters)
+      setResultNotice({
+        kind: 'failure',
+        title: '保存できませんでした',
+        message: error instanceof Error ? error.message : '保存データファイルに書き込めませんでした。',
+      })
+    }
   }
 
   const loadCurrentRoster = async () => {
-    const saved = mergeRecoveryRosters({ ...readSavedRosters(), ...normalizeSavedRostersRecord(await fetchStoredRosters()) })
+    const saved = repairSavedRosters(normalizeSavedRostersRecord(await fetchStoredRosters()))
     setSavedRosters(saved)
     const roster = saved[month]
     if (!roster) {

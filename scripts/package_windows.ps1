@@ -16,6 +16,9 @@ if (Test-Path $packageZip) {
 }
 
 pyinstaller --noconfirm --clean ShiftRosterBuilder.spec
+if ($LASTEXITCODE -ne 0) {
+  throw "PyInstaller failed with exit code $LASTEXITCODE"
+}
 
 $readme = Join-Path $packageDir "README.txt"
 @(
@@ -31,6 +34,13 @@ $readme = Join-Path $packageDir "README.txt"
   "- Existing browser-saved data is copied into data\\rosters.json when the app starts or when you save.",
   "- Close any other shift-roster-builder or development server before starting this packaged app."
 ) | Set-Content -LiteralPath $readme -Encoding UTF8
+
+$docsDir = Join-Path $root "docs"
+if (Test-Path $docsDir) {
+  Get-ChildItem -LiteralPath $docsDir -Filter "*.txt" | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $packageDir $_.Name) -Force
+  }
+}
 
 Compress-Archive -Path $packageDir -DestinationPath $packageZip
 
