@@ -2205,7 +2205,7 @@ function App() {
                             >
                               {allShiftOptions.map((code) => (
                                 <option key={code} value={code}>
-                                  {code === blankShiftCode ? '空白' : code === 'OFF' ? '休' : code === 'PAID' ? '有休' : code}
+                                  {code === blankShiftCode ? ' ' : code === 'OFF' ? '休' : code === 'PAID' ? '有休' : code}
                                 </option>
                               ))}
                             </select>
