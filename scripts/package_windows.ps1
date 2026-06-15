@@ -3,10 +3,17 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-npm run build
-
 $packageDir = Join-Path $root "dist\ShiftRosterBuilder"
 $packageZip = Join-Path $root "dist\ShiftRosterBuilder.zip"
+$existingRosterData = Join-Path $packageDir "data\rosters.json"
+$rosterDataBackup = Join-Path $root "build\rosters.package.backup.json"
+
+if (Test-Path $existingRosterData) {
+  New-Item -ItemType Directory -Path (Split-Path -Parent $rosterDataBackup) -Force | Out-Null
+  Copy-Item -LiteralPath $existingRosterData -Destination $rosterDataBackup -Force
+}
+
+npm run build
 
 if (Test-Path $packageDir) {
   Remove-Item -LiteralPath $packageDir -Recurse -Force
@@ -41,7 +48,16 @@ if (Test-Path $docsDir) {
   }
 }
 
-Compress-Archive -Path $packageDir -DestinationPath $packageZip
+if (Test-Path $rosterDataBackup) {
+  $dataDir = Join-Path $packageDir "data"
+  New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+  Copy-Item -LiteralPath $rosterDataBackup -Destination (Join-Path $dataDir "rosters.json") -Force
+}
+
+tar.exe -a -c -f $packageZip -C (Join-Path $root "dist") "ShiftRosterBuilder"
+if ($LASTEXITCODE -ne 0) {
+  throw "tar.exe failed with exit code $LASTEXITCODE"
+}
 
 Write-Host "Package created:"
 Write-Host $packageDir

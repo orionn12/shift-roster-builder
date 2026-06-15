@@ -306,6 +306,7 @@ const recoveryStructuredForm: StructuredForm = {
 }
 
 const baseShiftClasses = ['shift-a', 'shift-c', 'shift-e', 'shift-d', 'shift-x']
+const blankShiftCode = ''
 const reportStatLabels: Record<string, string> = {
   solverStatus: '作成状態',
   staffCount: 'スタッフ数',
@@ -668,6 +669,7 @@ function buildConditionsFromForm(form: StructuredForm, staff: string[], monthVal
 
 
 function getShiftClass(code: string) {
+  if (!code) return 'shift-blank'
   if (code === 'OFF') return 'shift-off'
   if (code === 'PAID') return 'shift-paid'
   if (code === '特休') return 'shift-tokkyuu'
@@ -679,7 +681,7 @@ function blankSchedule(staff: string[], days: number[]): Schedule {
   return Object.fromEntries(
     staff.map((person) => [
       person,
-      Object.fromEntries(days.map((day) => [day, 'OFF'])) as Record<number, ShiftCode>,
+      Object.fromEntries(days.map((day) => [day, blankShiftCode])) as Record<number, ShiftCode>,
     ]),
   )
 }
@@ -688,7 +690,7 @@ function mergeScheduleShape(current: Schedule, staff: string[], days: number[]):
   const next = blankSchedule(staff, days)
   for (const person of staff) {
     for (const day of days) {
-      next[person][day] = current[person]?.[day] ?? 'OFF'
+      next[person][day] = current[person]?.[day] ?? blankShiftCode
     }
   }
   return next
@@ -726,8 +728,9 @@ function sanitizeSchedule(
     )
     for (const day of days) {
       const key = dateKey(monthValue, day)
-      const code = next[person]?.[day] ?? 'OFF'
+      const code = next[person]?.[day] ?? blankShiftCode
       const manualCode = manualAssignments[person]?.[key]
+      if (!code) continue
       if (code === 'PAID' && manualCode !== 'PAID' && fixedDates[key] !== 'PAID' && !randomLeaveTypes.has('PAID')) {
         next[person][day] = 'OFF'
         continue
@@ -744,7 +747,7 @@ function sanitizeSchedule(
         manualCode !== code &&
         fixedDates[key] !== code
       ) {
-        next[person][day] = 'OFF'
+        next[person][day] = blankShiftCode
       }
     }
   }
@@ -761,6 +764,7 @@ function buildFixedAssignmentsForSolve(
   const next: ManualAssignments = {}
   for (const person of staff) {
     for (const [day, code] of Object.entries(pruned[person] ?? {})) {
+      if (!code) continue
       if (!next[person]) next[person] = {}
       next[person][day] = code
     }
@@ -1188,6 +1192,7 @@ function App() {
   const days = useMemo(() => getMonthDays(month), [month])
   const allShiftOptions = useMemo(
     () => [
+      blankShiftCode,
       'OFF',
       'PAID',
       '特休',
@@ -2168,7 +2173,7 @@ function App() {
                     <tr key={person}>
                       <th className="sticky-name">{person}</th>
                       {days.map((day) => {
-                        const value = visibleSchedule[person]?.[day] ?? 'OFF'
+                        const value = visibleSchedule[person]?.[day] ?? blankShiftCode
                         return (
                           <td key={day} className={`${getShiftClass(value)} ${isDayOff(month, day) ? 'weekend' : ''}`}>
                             <select
@@ -2185,16 +2190,22 @@ function App() {
                                 }))
                                 setManualAssignments((current) => ({
                                   ...current,
-                                  [person]: {
-                                    ...(current[person] ?? {}),
-                                    [dateKey(month, day)]: nextValue,
-                                  },
+                                  [person]: (() => {
+                                    const nextPersonAssignments = { ...(current[person] ?? {}) }
+                                    const key = dateKey(month, day)
+                                    if (nextValue) {
+                                      nextPersonAssignments[key] = nextValue
+                                    } else {
+                                      delete nextPersonAssignments[key]
+                                    }
+                                    return nextPersonAssignments
+                                  })(),
                                 }))
                               }}
                             >
                               {allShiftOptions.map((code) => (
                                 <option key={code} value={code}>
-                                  {code === 'OFF' ? '休' : code === 'PAID' ? '有休' : code}
+                                  {code === blankShiftCode ? '空白' : code === 'OFF' ? '休' : code === 'PAID' ? '有休' : code}
                                 </option>
                               ))}
                             </select>

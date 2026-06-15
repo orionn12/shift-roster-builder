@@ -941,6 +941,10 @@ thead .sticky-name {
   background-image: linear-gradient(rgba(86, 154, 211, 0.15), rgba(86, 154, 211, 0.15));
 }
 
+.shift-blank {
+  background-color: #ffffff;
+}
+
 .shift-a {
   background-color: #eef8ed;
 }
